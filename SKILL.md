@@ -97,6 +97,10 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
 - **`run_edit.py <edl.json> -o <out>`** — preferred guarded route: initialize → validate → render → QC. Pass `--visual-qc` for a final visual check.
 - **`review_editorial_plan.py <edl.json>`** — checks protected moments and asset-approval status, then writes `editorial_review.json`. `run_edit.py` performs this advisory review automatically.
 - **`graphics.py`** — renders the EDL's `graphics` (stickers, numbers, headlines, lower thirds, logo, end card) from `brand_kit.json` tokens; called by `render.py`.
+- **`audio_mix.py`** — dialogue chain, speech-aware music ducking, SFX, stems; called by `render.py`.
+- **`face_anchor.py`** — local Vision face centres per range (face framing, auto punch-in).
+- **`export_timeline.py <edl.json>`** — CMX3600 + FCP7 XML hand-off for Premiere / Resolve / Avid.
+- **`compare_takes.py --edit-dir <dir>`** — ranks repeated lines across takes.
 - **`analyze_references.py <files|dir> -o reference_analysis.json`** — measures finished reference videos (format, shot length, loudness, silence, dominant colours) so a style or brand kit can be learned from examples.
 - **`person_mask.py <video> -o <mask.mkv>`** — uses local macOS Vision to create a frame-accurate person matte. No footage is uploaded.
 
@@ -116,7 +120,13 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
    - Subtitle hidden behind an overlay (Rule 1 violation)
    - Overlay misaligned or showing wrong frames (Rule 4 violation)
 
-   Read `qc_report.json` first: it records output duration, stream presence, audio peak, validation results, and conservative nearly-black-frame signals at the start, end, and each cut. A nearly-black signal is a review prompt, not an automatic rejection—fades and intentional black scenes are valid. Also sample: first 2s, last 2s, and 2–3 mid-points — check grade consistency, subtitle readability, overall coherence. The QC report is factual evidence; the visual read remains an editorial judgment.
+   Read `qc_report.json` first. It records:
+   - output duration, stream presence, audio peak, and validation results;
+   - **integrated LUFS and true peak** against −14 / −1;
+   - **frozen or black stretches** across the whole timeline;
+   - **caption reading speed** (over 20 characters/second, or under 0.5 s on screen);
+   - a **pacing** block (shots, median shot length, words per minute, graphics per minute, longest stretch with no visual change);
+   - conservative nearly-black-frame signals at the start, end, and each cut. A nearly-black signal is a review prompt, not an automatic rejection—fades and intentional black scenes are valid. Also sample: first 2s, last 2s, and 2–3 mid-points — check grade consistency, subtitle readability, overall coherence. The QC report is factual evidence; the visual read remains an editorial judgment.
 
    If anything fails: fix → re-render → re-eval. **Cap at 3 self-eval passes** — if issues remain after 3, flag them to the user rather than looping forever. Only present the preview once the self-eval passes.
 8. **Iterate + persist.** Natural-language feedback, re-plan, re-render. Never re-transcribe. Final render on confirmation. Append to `project.md`.
@@ -235,6 +245,15 @@ python helpers/build_captions.py edit/edl.json -o edit/master_ar.ass --font "<ap
 
 Set the EDL `subtitles` field to that `.ass` file, then render through `run_edit.py`. The renderer preserves ASS typography and lets libass handle RTL shaping. Keep chunks to 3–5 words, preserve the original dialect and Unicode text, and check mixed Arabic/Latin words, numbers, punctuation, and safe-area placement in the visual QC filmstrips. Do not uppercase Arabic or manually reverse its characters.
 
+### Brand-styled captions (`"captions": true`)
+
+Set `"captions": true`, or an object of overrides, and the renderer builds captions from the transcripts. They are dressed by the brand kit's `caption_skin` and kept clear of graphics.
+
+- **Skin fields** (from the brand kit, overridable in the EDL): `position` (vertical centre, 0–1), `size_ratio`, `box` + `box_color` + `box_opacity`, `text_color`, `outline_color`, `highlight` (the colour of the word being spoken), `max_words`, `font`.
+- **Clearance:** captions move above or below any graphic that overlaps their band, and hide under an `end_card`.
+- **Bidi:** mixed Arabic/Latin lines get RTL ordering. On macOS, Arabic with `highlight` is rendered as a CoreText caption track, because libass lays out bidi per style run and a coloured word would break the line's word order.
+- **Precedence:** an explicit `subtitles` file wins over `captions`.
+
 ## Subject in front of graphs or text
 
 Use `behind_subject_overlays` when a graph, animated label, or visual must appear behind the person. Video Use creates a local macOS Vision person matte from the assembled base video, draws these layers, restores the person as the foreground, then applies ordinary `overlays` and subtitles on top.
@@ -339,6 +358,51 @@ This is one style. If the brand is warm and serif, use that. If it's colorful an
 
 One sub-agent = one file (unique filenames, parallel agents don't overwrite each other).
 
+## Audio post (`audio` in the EDL)
+
+The dialogue master (equal-power crossfades) can be finished like a mix engineer would. All levels are relative to the measured dialogue loudness; the final mix is then normalized to −14 LUFS / −1 dBTP. Stems go to `<edit>/stems/` (`dialogue.wav`, `music.wav`, `sfx.wav`, `mix.wav`).
+
+```json
+"audio": {
+  "crossfade_ms": 30,
+  "dialogue": {"preset": "clean", "denoise": false},
+  "music": [{"file": "music/bed.mp3", "source_start": 12.0, "start_in_output": 0, "end_in_output": null,
+             "bed_lu": -20, "gap_lu": -9, "fade_in_ms": 800, "fade_out_ms": 2000, "loop": true}],
+  "sfx": [{"file": "sfx/pop.wav", "at": {"source": "C0103", "time": 41.30}, "gain_db": -8}]
+}
+```
+
+- **Dialogue presets:**
+  - `clean`: highpass plus a gentle compressor.
+  - `broadcast`: highpass, de-esser, and firmer compression.
+  - `none`.
+  - `denoise: true` adds FFT denoise. Use it only when there is audible hiss or hum, and listen afterwards.
+- **Music ducking:** speech is detected from the edited dialogue itself. The bed sits `bed_lu` below the dialogue under speech and rises to `gap_lu` in pauses longer than `min_gap_ms` (default 700), with `attack_ms` / `release_ms` ramps. Breaths don't pump it.
+- **Music choice:** pick the music for the style recipe (energy, mood, phrase length). Start it on a beat that supports the hook, and fade it under the end card.
+- **SFX:** accents only, one per payoff. Land them with `at` on the word or graphic they support.
+- **Licensing:** use only music and SFX that the user supplied or approved. Never fetch tracks.
+- **Split edits:**
+  - `"j_cut_ms": 250` on a range starts its sound under the previous picture (anticipation, interviews).
+  - `"l_cut_ms"` lets the previous sound run on under this range's picture (reactions, B-roll).
+  - Neither changes the duration. The validator rejects both on the same cut.
+
+## Transitions, framing, and look
+
+- **Transitions:** set `"transition": {"type": "dissolve", "duration_ms": 400}` on the range a transition leads *into*.
+  - Types: `dissolve`, `dip_black`, `dip_white`, `whip`, `slide`, `zoom`, `wipe`.
+  - The clip is built from handles on both sides and laid centred over the cut, so the length and audio sync never change.
+  - The default is still a hard cut. Use a transition only for a real change of time, place, or section, never to hide a weak cut.
+- **Face anchor:** `source_framing.X.anchor: "face"` (or `punch_in.anchor: "face"`) centres every crop on the face. It uses local macOS Vision, takes a median per range, and caches results in `<edit>/faces/`. This is the right default for 16:9 → 9:16 / 4:5 reframes of talking heads.
+- **Auto punch:** `"auto_punch": {"scale": 1.1}` (or `true`) alternates framing on jump cuts (consecutive ranges of one take), anchored on the face. A hand-set `punch_in` always wins.
+- **LUT look:** `"grade": {"base": "auto", "lut": "looks/teal.cube", "intensity": 0.6}` applies the per-source auto correction first, then a creative LUT blended at `intensity`.
+
+## Delivery versions and hand-off
+
+- `"deliverables": [{"name": "feed_4x5", "canvas": {"width": 1080, "height": 1350}}]`, then run `run_edit.py ... --deliverables`. Every version reuses the same cut. Graphics and captions are relative, so they re-lay automatically, and each version gets its own QC report. A deliverable may override `source_framing` and `captions`.
+- `render.py --canvas 1080x1080` renders a single other canvas.
+- `export_timeline.py edl.json` writes a CMX3600 `.edl` and an FCP7 `.xml` (Premiere, Resolve, Avid) with source timecode and file paths, for a finishing editor.
+- `compare_takes.py --edit-dir edit` finds lines spoken in several takes and ranks them by completeness, fillers, hesitations, and pace. Read `take_comparison.md` before choosing takes in a multi-take shoot.
+
 ## Output spec
 
 Match the source unless the user asked for something specific. Common targets: `1920×1080@24` cinematic, `1920×1080@30` screen content, `1080×1920@30` vertical social, `3840×2160@24` 4K cinema, `1080×1080@30` square. `render.py` conforms every segment to ONE canvas: the EDL `canvas` (`{"width": 1080, "height": 1920}`) or, by default, 1920×1080 / 1080×1920 following the first source's orientation. Per-source `source_framing` chooses `cover` (crop at `anchor_x`/`anchor_y`, default), `fit` (bars), or `blur_fit` (fit over a blurred fill). Mixed-orientation sources are allowed; the validator warns when a cover crop on a mismatched source has no chosen anchor. Worth asking the user which delivery format matters.
@@ -356,21 +420,26 @@ Match the source unless the user asked for something specific. Common targets: `
      "beat": "SOLUTION", "quote": "...", "reason": "Only take without the false start."},
     {"source": "C0108", "start": 31.20, "end": 35.00,
      "beat": "PROOF", "quote": "...", "reason": "Key demonstration.",
-     "punch_in": {"scale": 1.08, "anchor_y": 0.4, "reason": "Draws focus to the proof without cropping the UI."}}
+     "punch_in": {"scale": 1.08, "anchor_y": 0.4, "reason": "Draws focus to the proof without cropping the UI."},
+     "transition": {"type": "dip_black", "duration_ms": 500}, "j_cut_ms": 200}
   ],
   "canvas": {"width": 1080, "height": 1920},
-  "source_framing": {"C0108": {"mode": "cover", "anchor_x": 0.45}},
-  "audio": {"crossfade_ms": 30},
+  "source_framing": {"C0108": {"mode": "cover", "anchor": "face"}},
+  "auto_punch": {"scale": 1.1},
+  "audio": {"crossfade_ms": 30, "dialogue": {"preset": "clean"},
+            "music": [{"file": "music/bed.mp3", "bed_lu": -20, "gap_lu": -9}]},
   "grade": "warm_cinematic",
+  "graphics": [{"type": "number", "text": "5", "label": "days", "at": {"source": "C0108", "time": 15.1}, "duration": 1.8}],
+  "captions": true,
+  "deliverables": [{"name": "feed_4x5", "canvas": {"width": 1080, "height": 1350}}],
   "overlays": [
     {"file": "edit/animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
   ],
-  "subtitles": "edit/master.srt",
   "total_duration_s": 87.4
 }
 ```
 
-`grade` is a preset name, a raw ffmpeg filter, or `auto` (a bounded correction measured once per source, so every range of one take shares it). `canvas`, `source_framing`, and `audio` are optional. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+`grade` is a preset name, a raw ffmpeg filter, `auto` (a bounded correction measured once per source, so every range of one take shares it), or `{base, lut, intensity}`. Every key besides `sources` and `ranges` is optional. `overlays` are rendered animation clips. `subtitles` (an explicit file) or `captions` (brand-styled, built from transcripts) is applied LAST.
 
 ## Memory — `project.md`
 

@@ -440,7 +440,8 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
                     yield frame.tobytes()
 
             encode_alpha_mov(frames(), canvas, rate, out)
-        return {"file": str(out), "start_in_output": start, "duration": duration, "x": 0, "y": 0}
+        return {"file": str(out), "start_in_output": start, "duration": duration, "x": 0, "y": 0,
+                "w": w, "h": h, "type": kind}
 
     if kind == "logo":
         image = _load_logo(tokens, element)
@@ -465,7 +466,8 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
     if not out.exists():
         encode_alpha_mov(frames, box, rate, out)
     x, y = place(position, box, canvas)
-    return {"file": str(out), "start_in_output": start, "duration": duration, "x": x, "y": y}
+    return {"file": str(out), "start_in_output": start, "duration": duration, "x": x, "y": y,
+            "w": box[0], "h": box[1], "type": kind}
 
 
 def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str) -> tuple[list[dict], list[dict]]:

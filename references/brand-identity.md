@@ -68,6 +68,7 @@ Field reference for the graphics renderer (`helpers/graphics.py`):
 | `logo` | `file` (PNG with transparency; padding is trimmed), `placement`, `width_ratio`, `opacity` |
 | `end_card.file` | An alternative logo for the end card |
 | `motion` | `energy` (`calm` / `medium` / `high`) or an explicit `pop_in_ms` |
+| `caption_skin` | `position` (0–1), `size_ratio`, `box`, `box_color`, `box_opacity`, `text_color`, `outline_color`, `highlight`, `max_words`, `font` (falls back to `fonts.caption` → `fonts.arabic` → `fonts.body`) |
 
 
 - Graphics, stickers, captions, and end cards take their colours, fonts, and shapes

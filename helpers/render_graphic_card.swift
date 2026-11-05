@@ -6,12 +6,19 @@ import AppKit
 import CoreText
 import Foundation
 
+struct Span: Decodable {
+    let start: Int   // UTF-16 offset
+    let length: Int
+    let color: String
+}
+
 struct Line: Decodable {
     let text: String
     let font: String?
     let size: CGFloat
     let color: String
     let weight: String?
+    let spans: [Span]?
 }
 
 struct Paint: Decodable {
@@ -104,11 +111,19 @@ func attributed(_ line: Line, align: NSTextAlignment, colorOverride: NSColor? = 
     paragraph.alignment = align
     paragraph.baseWritingDirection = isRTL(line.text) ? .rightToLeft : .leftToRight
     paragraph.lineBreakMode = .byWordWrapping
-    return NSAttributedString(string: line.text, attributes: [
+    let result = NSMutableAttributedString(string: line.text, attributes: [
         .font: font(line.font, size: line.size, weight: line.weight),
         .foregroundColor: colorOverride ?? color(line.color),
         .paragraphStyle: paragraph,
     ])
+    // Coloured spans (e.g. the word being spoken) keep one paragraph, so
+    // bidi ordering of mixed Arabic/Latin stays correct.
+    if colorOverride == nil {
+        for span in line.spans ?? [] where span.start >= 0 && span.start + span.length <= result.length {
+            result.addAttribute(.foregroundColor, value: color(span.color), range: NSRange(location: span.start, length: span.length))
+        }
+    }
+    return result
 }
 
 func gradient(_ paint: Paint) -> NSGradient? {

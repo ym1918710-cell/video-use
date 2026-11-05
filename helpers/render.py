@@ -252,6 +252,9 @@ def _unit(value: object, default: float = 0.5) -> float:
         return default
 
 
+FACE_HEADROOM = 0.36
+
+
 def framing_filter(
     canvas: tuple[int, int],
     source_size: tuple[int, int] | None,
@@ -320,8 +323,15 @@ def framing_filter(
     cw, ch = cw / scale, ch / scale
     cw = min(sw - sw % 2, max(2, int(cw) // 2 * 2))
     ch = min(sh - sh % 2, max(2, int(ch) // 2 * 2))
-    x = int(round((sw - cw) * ax))
-    y = int(round((sh - ch) * ay))
+    face = (punch_in or {}).get("face_center") or framing.get("face_center")
+    if face:
+        # Face-anchored: face centre on the canvas's vertical centre line, at
+        # FACE_HEADROOM of the crop height (eyes near the upper third).
+        x = int(round(min(max(float(face[0]) * sw - cw / 2, 0), sw - cw)))
+        y = int(round(min(max(float(face[1]) * sh - ch * FACE_HEADROOM, 0), sh - ch)))
+    else:
+        x = int(round((sw - cw) * ax))
+        y = int(round((sh - ch) * ay))
     if (cw, ch, x, y) == (sw, sh, 0, 0):
         return finish
     return f"crop={cw}:{ch}:{x}:{y}," + finish
@@ -487,12 +497,52 @@ def extract_segment(
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
+def lut_filter(grade: dict, edit_dir: Path) -> str:
+    """`grade: {"lut": "look.cube", "intensity": 0.7, "base": "auto"}` → filter chain."""
+    lut = grade.get("lut")
+    if not lut:
+        return ""
+    path = str(resolve_path(lut, edit_dir)).replace("\\", "/").replace("'", r"\'").replace(":", r"\:")
+    intensity = max(0.0, min(1.0, float(grade.get("intensity", 1.0))))
+    apply = f"lut3d=file='{path}':interp=tetrahedral"
+    if intensity >= 0.999:
+        return apply
+    return (f"split[vu_lut_a][vu_lut_b];[vu_lut_b]{apply}[vu_lut_l];"
+            f"[vu_lut_a][vu_lut_l]blend=all_expr='A*{1 - intensity:.3f}+B*{intensity:.3f}'")
+
+
+def range_looks(edl: dict, edit_dir: Path) -> list[tuple[dict | None, dict | None]]:
+    """Per-range (punch_in, framing) after auto punch-ins and face anchors."""
+    from face_anchor import needs_faces, plan_auto_punch, range_face_centers
+    ranges = edl["ranges"]
+    source_framing = edl.get("source_framing") or {}
+    punches = plan_auto_punch(ranges, edl.get("auto_punch"))
+    centers: list = [None] * len(ranges)
+    if needs_faces(edl):
+        try:
+            centers = range_face_centers(edl, edit_dir, resolve_path)
+        except (RuntimeError, OSError, subprocess.CalledProcessError, ValueError) as exc:
+            print(f"  face anchoring unavailable ({exc}); using configured anchors")
+    looks = []
+    for i, r in enumerate(ranges):
+        framing = dict(source_framing.get(r["source"]) or {})
+        punch = dict(punches[i]) if punches[i] else None
+        center = centers[i]
+        if center and framing.get("anchor") == "face":
+            framing["face_center"] = center
+        if punch and center and punch.get("anchor", "face" if punch.get("auto") else None) == "face":
+            punch["face_center"] = center
+        looks.append((punch, framing or None))
+    return looks
+
+
 def extract_all_segments(
     edl: dict,
     edit_dir: Path,
     preview: bool,
     draft: bool = False,
     fps: str | None = None,
+    plans_out: list | None = None,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -501,7 +551,12 @@ def extract_all_segments(
     `auto_grade_for_clip` and apply a per-segment subtle correction.
     Otherwise, apply the same preset/raw filter to every segment.
     """
-    resolved = resolve_grade_filter(edl.get("grade"))
+    grade_field = edl.get("grade")
+    lut_chain = ""
+    if isinstance(grade_field, dict):
+        lut_chain = lut_filter(grade_field, edit_dir)
+        grade_field = grade_field.get("base")
+    resolved = resolve_grade_filter(grade_field)
     is_auto = resolved == "__AUTO__"
     clips_dir = edit_dir / (
         "clips_draft" if draft else ("clips_preview" if preview else "clips_graded")
@@ -532,6 +587,8 @@ def extract_all_segments(
             source_grades[src_name], _ = auto_grade_for_ranges(src_path, spans)
             print(f"        {src_name} grade: {source_grades[src_name] or '(none)'}")
 
+    looks = range_looks(edl, edit_dir)
+
     seg_paths: list[Path] = []
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/  @ {out_rate} fps"
           f"{' (forced)' if fps is not None else ' (from source)'}  canvas {canvas[0]}x{canvas[1]}")
@@ -542,19 +599,100 @@ def extract_all_segments(
         frames, _offset, duration = timing[i]
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
         seg_filter = source_grades.get(src_name, "") if is_auto else resolved
+        seg_filter = ",".join(f for f in (seg_filter, lut_chain) if f)
+        punch, framing = looks[i]
 
         note = r.get("beat") or r.get("note") or ""
+        if punch and not r.get("punch_in"):
+            note = (note + "  [auto punch]").strip()
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{start + duration:7.2f}  ({duration:5.2f}s, {frames}f)  {note}")
         extract_segment(
             src_path, start, duration, seg_filter, out_path,
-            preview=preview, draft=draft, rate=out_rate, punch_in=r.get("punch_in"),
+            preview=preview, draft=draft, rate=out_rate, punch_in=punch,
             rotation=source_rotations.get(src_name),
-            canvas=canvas, framing=source_framing.get(src_name),
+            canvas=canvas, framing=framing,
             frames=frames, include_audio=False,
         )
         seg_paths.append(out_path)
+        if plans_out is not None:
+            plans_out.append({"source": src_path, "filter": seg_filter, "punch_in": punch, "framing": framing,
+                              "rotation": source_rotations.get(src_name), "canvas": canvas})
 
     return seg_paths
+
+
+XFADE_TRANSITIONS = {
+    "dissolve": "fade", "dip_black": "fadeblack", "dip_white": "fadewhite",
+    "whip": "smoothleft", "slide": "slideleft", "zoom": "zoomin", "wipe": "wipeleft",
+}
+
+
+def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[dict], rate: str,
+                      preview: bool, draft: bool) -> Path:
+    """Lay centred transition clips over the cut points of the assembled base.
+
+    Each clip is built from handles on both sides of the boundary (outgoing
+    shot running past its out point, incoming shot from before its in point)
+    and crossed with ``xfade``. It replaces exactly the frames around the cut,
+    so the timeline length — and the separately built audio — never moves.
+    """
+    ranges = edl["ranges"]
+    items = [(i, r["transition"]) for i, r in enumerate(ranges) if i > 0 and r.get("transition")]
+    if not items:
+        return base_path
+    fps = float(Fraction(rate))
+    timing = segment_timing(ranges, rate)
+    tdir = edit_dir / "transitions"
+    tdir.mkdir(parents=True, exist_ok=True)
+    clips: list[tuple[Path, float, float]] = []
+    print(f"transitions: {len(items)}")
+    for i, spec in items:
+        if isinstance(spec, str):
+            spec = {"type": spec}
+        kind = spec.get("type", "dissolve")
+        a, b = ranges[i - 1], ranges[i]
+        a_plan, b_plan = plans[i - 1], plans[i]
+        a_end, b_start = float(a["end"]), float(b["start"])
+        want = float(spec.get("duration_ms", 400)) / 2000.0
+        a_dur = probe_media_duration(a_plan["source"])
+        room = min(want, b_start, (float(a["end"]) - float(a["start"])) / 2, (float(b["end"]) - float(b["start"])) / 2,
+                   (a_dur - a_end) if a_dur is not None else want)
+        half = int(room * fps)
+        if half < 2:
+            print(f"  [{i:02d}] {kind}: not enough handle media; hard cut kept")
+            continue
+        n, hd = 2 * half, half / fps
+        parts = []
+        for side, (rng_start, plan) in (("a", (a_end - hd, a_plan)), ("b", (b_start - hd, b_plan))):
+            part = tdir / f"t{i:02d}_{side}.mp4"
+            extract_segment(plan["source"], rng_start, n / fps, plan["filter"], part, preview=preview, draft=draft,
+                            rate=rate, punch_in=plan["punch_in"], rotation=plan["rotation"], canvas=plan["canvas"],
+                            framing=plan["framing"], frames=n, include_audio=False)
+            parts.append(part)
+        clip = tdir / f"t{i:02d}_{kind}.mp4"
+        subprocess.run([
+            "ffmpeg", "-y", "-v", "error", "-i", str(parts[0]), "-i", str(parts[1]), "-filter_complex",
+            f"[0:v][1:v]xfade=transition={XFADE_TRANSITIONS[kind]}:duration={(n - 1) / fps:.6f}:offset=0,format=yuv420p",
+            "-frames:v", str(n), "-r", rate, "-c:v", "libx264", "-preset", "fast", "-crf", "16", str(clip),
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        start = timing[i][1] - hd
+        clips.append((clip, start, n / fps))
+        print(f"  [{i:02d}] {kind} {n / fps * 1000:.0f}ms @ {timing[i][1]:.2f}s")
+    if not clips:
+        return base_path
+    out = base_path.with_name(base_path.stem + "_fx.mp4")
+    inputs = ["-i", str(base_path)]
+    graph, current = [], "[0:v]"
+    for k, (clip, start, dur) in enumerate(clips, start=1):
+        inputs += ["-i", str(clip)]
+        graph.append(f"[{k}:v]setpts=PTS-STARTPTS+{start:.6f}/TB[t{k}]")
+        graph.append(f"{current}[t{k}]overlay=eof_action=pass:enable='between(t,{start:.6f},{start + dur - 0.5 / fps:.6f})'[v{k}]")
+        current = f"[v{k}]"
+    preset, crf = ("ultrafast", "28") if draft else (("fast", "20") if preview else ("medium", "16"))
+    subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(graph), "-map", current,
+                    "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p", "-r", rate,
+                    "-an", str(out)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return out
 
 
 def resolve_output_rate(edl: dict, edit_dir: Path, fps: str | None = None) -> str:
@@ -629,6 +767,7 @@ def build_audio_track(
     parts_dir.mkdir(parents=True, exist_ok=True)
     durations: dict[str, float | None] = {}
     placements: list[tuple[Path, float]] = []
+    shifts = boundary_audio_shifts(ranges)
     for i, r in enumerate(ranges):
         src_name = r["source"]
         src = resolve_path(sources[src_name], edit_dir)
@@ -636,7 +775,14 @@ def build_audio_track(
             durations[src_name] = probe_media_duration(src)
         src_dur = durations[src_name]
         _frames, offset, duration = timing[i]
-        start = float(r["start"])
+        # J/L cuts move this range's audio boundaries (never the picture).
+        shift_in, shift_out = shifts[i], shifts[i + 1]
+        shift_in = max(shift_in, -float(r["start"]))
+        start = float(r["start"]) + shift_in
+        offset = offset + shift_in
+        duration = duration - shift_in + shift_out
+        if src_dur is not None:
+            duration = min(duration, src_dur - start)
         end = start + duration
 
         # Handles only where a neighbour exists to crossfade with.
@@ -672,6 +818,25 @@ def build_audio_track(
     _mix_placements(placements, total, out_wav)
     print(f"audio → {out_wav.name}  ({len(placements)} segment(s), {crossfade_ms:.0f}ms equal-power crossfades)")
     return out_wav
+
+
+def boundary_audio_shifts(ranges: list[dict]) -> list[float]:
+    """Audio offset (s) at each boundary: shifts[i] is the boundary *into* range i.
+
+    ``j_cut_ms`` on range i starts its sound early under the previous picture
+    (negative shift); ``l_cut_ms`` lets the previous sound run on under range
+    i's picture (positive shift). The first and last edges never move.
+    """
+    shifts = [0.0] * (len(ranges) + 1)
+    for i, r in enumerate(ranges):
+        if i == 0:
+            continue
+        j = float(r.get("j_cut_ms") or 0) / 1000.0
+        l = float(r.get("l_cut_ms") or 0) / 1000.0
+        prev_len = float(ranges[i - 1]["end"]) - float(ranges[i - 1]["start"])
+        this_len = float(r["end"]) - float(r["start"])
+        shifts[i] = max(-0.8 * prev_len, min(0.8 * this_len, l - j))
+    return shifts
 
 
 def _mix_placements(placements: list[tuple[Path, float]], total: float, out_wav: Path, batch: int = 32) -> None:
@@ -1145,6 +1310,7 @@ def main() -> None:
              "(falls back to 24 if it can't be probed). Pass e.g. --fps 30 or "
              "--fps 30000/1001 to force.",
     )
+    ap.add_argument("--canvas", help="Override the output canvas, e.g. 1080x1350 (deliverable versions)")
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -1154,10 +1320,14 @@ def main() -> None:
     edl = json.loads(edl_path.read_text())
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
+    if args.canvas:
+        width, _, height = args.canvas.lower().partition("x")
+        edl["canvas"] = {"width": int(width), "height": int(height)}
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
+    plans: list[dict] = []
     segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps
+        edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps, plans_out=plans
     )
 
     # 2. Concat → base
@@ -1169,39 +1339,57 @@ def main() -> None:
         base_name = "base.mp4"
     base_path = edit_dir / base_name
     concat_segments(segment_paths, base_path, edit_dir)
-
-    # 3. Subtitles: build if requested, resolve final path
-    subs_path: Path | None = None
-    if not args.no_subtitles:
-        if args.build_subtitles:
-            subs_path = edit_dir / "master.srt"
-            build_master_srt(edl, edit_dir, subs_path)
-        elif edl.get("subtitles"):
-            subs_path = resolve_path(edl["subtitles"], edit_dir)
-            if not subs_path.exists():
-                print(f"warning: subtitles path in EDL does not exist: {subs_path}")
-                subs_path = None
-
-    # 4. Audio master: PCM, equal-power crossfades on every cut
     rate = resolve_output_rate(edl, edit_dir, args.fps)
+    canvas = resolve_canvas(edl, edit_dir, args.draft)
+    base_path = apply_transitions(edl, edit_dir, base_path, plans, rate, args.preview, args.draft)
+
+    # 3. Audio master: PCM, equal-power crossfades on every cut
     audio_path = build_audio_track(edl, edit_dir, rate, base_path.with_name(base_path.stem + "_audio.wav"))
+    timing = segment_timing(edl["ranges"], rate)
+    total_s = timing[-1][1] + timing[-1][2] if timing else 0.0
+    from audio_mix import build_mix
+    from graphics import output_time
+    audio_path = build_mix(edl, edit_dir, audio_path, total_s, at_resolver=lambda at: output_time(edl, at, rate))
     audio_filter = None
     if not args.no_loudnorm:
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         audio_filter = loudnorm_filter(audio_path, one_pass=args.draft)
 
-    # 5. Brand-driven graphics → ordinary overlay entries
+    # 4. Brand-driven graphics → ordinary overlay entries
     overlays = list(edl.get("overlays") or [])
     behind_subject_overlays = list(edl.get("behind_subject_overlays") or [])
     mask_config = edl.get("subject_mask")
+    graphic_boxes: list[dict] = []
     if edl.get("graphics"):
         from graphics import build_graphics
         print("graphics (brand kit tokens)")
-        graphic_top, graphic_behind = build_graphics(edl, edit_dir, resolve_canvas(edl, edit_dir, args.draft), rate)
+        graphic_top, graphic_behind = build_graphics(edl, edit_dir, canvas, rate)
         overlays += graphic_top
         behind_subject_overlays += graphic_behind
+        graphic_boxes = graphic_top + graphic_behind
         if graphic_behind and not mask_config:
             mask_config = {"mode": "person"}
+
+    # 5. Captions: explicit file, brand-styled auto captions, or legacy SRT
+    subs_path: Path | None = None
+    if not args.no_subtitles:
+        if edl.get("subtitles"):
+            subs_path = resolve_path(edl["subtitles"], edit_dir)
+            if not subs_path.exists():
+                print(f"warning: subtitles path in EDL does not exist: {subs_path}")
+                subs_path = None
+        elif edl.get("captions"):
+            from build_captions import build_caption_track, needs_coretext_track, write_styled_captions
+            # The ASS is always written: QC reads caption timing from it.
+            ass_path = write_styled_captions(edl, edit_dir, canvas, graphic_boxes, edit_dir / "captions.ass")
+            if needs_coretext_track(edl, edit_dir):
+                overlays.append(build_caption_track(edl, edit_dir, canvas, graphic_boxes, rate, total_s,
+                                                    edit_dir / "captions_track" / "captions.mov"))
+            else:
+                subs_path = ass_path
+        elif args.build_subtitles:
+            subs_path = edit_dir / "master.srt"
+            build_master_srt(edl, edit_dir, subs_path)
 
     # 6. Composite (overlays + subtitles LAST); AAC is encoded once, here
     subject_mask = ensure_subject_mask(base_path, edit_dir, mask_config) if behind_subject_overlays else None

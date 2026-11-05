@@ -125,6 +125,8 @@ def validate_framing(
             for key in ("anchor_x", "anchor_y"):
                 if key in value and not 0.0 <= float(value[key]) <= 1.0:
                     raise ValueError
+            if value.get("anchor") not in (None, "face"):
+                raise ValueError
         except (TypeError, ValueError):
             report["errors"].append(issue("error", "invalid_source_framing", "Framing mode must be cover, fit, or blur_fit; anchors must be from 0 to 1.", path))
 
@@ -139,16 +141,88 @@ def validate_framing(
         source_framing = framing.get(source_id) or {}
         if not isinstance(raw_path, str) or not isinstance(source_framing, dict) or rotations.get(source_id):
             continue
-        if source_framing.get("mode", "cover") != "cover" or "anchor_x" in source_framing:
+        if (source_framing.get("mode", "cover") != "cover" or "anchor_x" in source_framing
+                or source_framing.get("anchor") == "face"):
             continue
         size = probe_display_size(resolve_path(raw_path, base))
         if size and (size[1] > size[0]) != canvas_portrait:
             report["warnings"].append(issue(
                 "warning", "orientation_crop",
                 f"Source {size[0]}x{size[1]} is cover-cropped into a {canvas[0]}x{canvas[1]} canvas. "
-                "Choose an anchor_x/anchor_y on the subject, or use fit / blur_fit.",
+                "Use anchor: \"face\", choose an anchor_x/anchor_y on the subject, or use fit / blur_fit.",
                 f"source_framing.{source_id}",
             ))
+
+
+TRANSITION_TYPES = {"dissolve", "dip_black", "dip_white", "whip", "slide", "zoom", "wipe"}
+
+
+def validate_extras(edl: dict[str, Any], base: Path) -> list[tuple[str, str, str, str]]:
+    """Transitions, J/L cuts, auto punch, LUT grade, captions, deliverables."""
+    out: list[tuple[str, str, str, str]] = []
+    for i, r in enumerate(edl.get("ranges") or []):
+        if not isinstance(r, dict):
+            continue
+        path = f"ranges[{i}]"
+        transition = r.get("transition")
+        if transition is not None:
+            spec = {"type": transition} if isinstance(transition, str) else transition
+            if i == 0:
+                out.append(("error", "invalid_transition", "The first range has no incoming cut to transition.", f"{path}.transition"))
+            elif not isinstance(spec, dict) or spec.get("type", "dissolve") not in TRANSITION_TYPES:
+                out.append(("error", "invalid_transition", f"type must be one of {sorted(TRANSITION_TYPES)}.", f"{path}.transition"))
+            else:
+                try:
+                    if not 80 <= float(spec.get("duration_ms", 400)) <= 2000:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    out.append(("error", "invalid_transition", "duration_ms must be 80–2000.", f"{path}.transition.duration_ms"))
+        for key in ("j_cut_ms", "l_cut_ms"):
+            if r.get(key) is None:
+                continue
+            try:
+                value = float(r[key])
+                if i == 0 or not 0 <= value <= 1500:
+                    raise ValueError
+            except (TypeError, ValueError):
+                out.append(("error", "invalid_split_edit", f"{key} must be 0–1500 ms and not on the first range.", f"{path}.{key}"))
+        if r.get("j_cut_ms") and r.get("l_cut_ms"):
+            out.append(("error", "invalid_split_edit", "Use either j_cut_ms or l_cut_ms on one cut, not both.", path))
+    auto = edl.get("auto_punch")
+    if isinstance(auto, dict):
+        try:
+            if not 1.03 <= float(auto.get("scale", 1.1)) <= 1.25:
+                raise ValueError
+        except (TypeError, ValueError):
+            out.append(("error", "invalid_auto_punch", "auto_punch.scale must be 1.03–1.25.", "auto_punch.scale"))
+    elif auto not in (None, True, False):
+        out.append(("error", "invalid_auto_punch", "auto_punch must be true or an object.", "auto_punch"))
+    grade = edl.get("grade")
+    if isinstance(grade, dict):
+        lut = grade.get("lut")
+        if lut and not resolve_path(str(lut), base).is_file():
+            out.append(("error", "lut_missing", f"LUT {lut} not found.", "grade.lut"))
+        try:
+            if not 0 <= float(grade.get("intensity", 1)) <= 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            out.append(("error", "invalid_grade", "grade.intensity must be 0–1.", "grade.intensity"))
+    captions = edl.get("captions")
+    if captions is not None and not isinstance(captions, (bool, dict)):
+        out.append(("error", "invalid_captions", "captions must be true or an object of caption-skin overrides.", "captions"))
+    if isinstance(captions, dict) and "position" in captions and not 0.05 <= float(captions["position"]) <= 0.95:
+        out.append(("error", "invalid_captions", "captions.position must be 0.05–0.95.", "captions.position"))
+    for k, item in enumerate(edl.get("deliverables") or []):
+        if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+            out.append(("error", "invalid_deliverable", "Every deliverable needs a name.", f"deliverables[{k}]"))
+            continue
+        canvas = item.get("canvas")
+        if canvas is not None:
+            scratch: dict[str, Any] = {"errors": [], "warnings": []}
+            validate_canvas(canvas, scratch)
+            if scratch["errors"]:
+                out.append(("error", "invalid_deliverable", "canvas needs even integer width/height (16–8192).", f"deliverables[{k}].canvas"))
+    return out
 
 
 def validate_edl(edl_path: Path) -> dict[str, Any]:
@@ -254,7 +328,9 @@ def validate_edl(edl_path: Path) -> dict[str, Any]:
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from graphics import validate_graphics
-    for level, code, message, item_path in validate_graphics(edl, total):
+    from audio_mix import validate_audio
+    for level, code, message, item_path in [*validate_graphics(edl, total), *validate_audio(edl, base, total),
+                                            *validate_extras(edl, base)]:
         report["errors" if level == "error" else "warnings"].append(issue(level, code, message, item_path))
 
     canvas = validate_canvas(edl.get("canvas"), report)

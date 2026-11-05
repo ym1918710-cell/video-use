@@ -24,6 +24,8 @@ def main() -> None:
     parser.add_argument("--no-loudnorm", action="store_true")
     parser.add_argument("--fps")
     parser.add_argument("--visual-qc", action="store_true", help="Generate cut-boundary filmstrips for agent review")
+    parser.add_argument("--deliverables", action="store_true",
+                        help="Also render every EDL `deliverables` version (other canvases / framings)")
     args = parser.parse_args()
 
     edl = args.edl.resolve()
@@ -60,6 +62,37 @@ def main() -> None:
         qc_command.append("--visual")
     subprocess.run(qc_command, check=True)
     update(edl.parent, status="qc_passed", latest_qc_report=str(edl.parent / "qc_report.json"))
+
+    if args.deliverables:
+        for variant_path, output in write_deliverable_edls(edl, args.output.resolve()):
+            print(f"deliverable → {output.name}")
+            command = [sys.executable, str(helper_dir / "render.py"), str(variant_path), "-o", str(output)]
+            command += [flag for flag, on in (("--preview", args.preview), ("--draft", args.draft),
+                                              ("--no-subtitles", args.no_subtitles), ("--no-loudnorm", args.no_loudnorm)) if on]
+            if args.fps:
+                command += ["--fps", args.fps]
+            subprocess.run(command, check=True)
+            subprocess.run([sys.executable, str(helper_dir / "verify_render.py"), str(variant_path), str(output),
+                            "--report", str(variant_path.with_name(f"qc_report_{variant_path.stem}.json"))], check=True)
+
+
+def write_deliverable_edls(edl_path: Path, output: Path) -> list[tuple[Path, Path]]:
+    """One EDL per deliverable: same cut, its own canvas / framing / captions."""
+    edl = json.loads(edl_path.read_text(encoding="utf-8"))
+    pairs = []
+    for item in edl.get("deliverables") or []:
+        name = str(item["name"])
+        variant = {k: v for k, v in edl.items() if k != "deliverables"}
+        if item.get("canvas"):
+            variant["canvas"] = item["canvas"]
+        if item.get("source_framing"):
+            variant["source_framing"] = {**(edl.get("source_framing") or {}), **item["source_framing"]}
+        if "captions" in item:
+            variant["captions"] = item["captions"]
+        variant_path = edl_path.with_name(f"{edl_path.stem}_{name}.json")
+        variant_path.write_text(json.dumps(variant, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        pairs.append((variant_path, output.with_name(f"{output.stem}_{name}{output.suffix}")))
+    return pairs
 
 
 if __name__ == "__main__":

@@ -74,6 +74,102 @@ def audio_peak_db(path: Path) -> float | None:
     return float(match.group(1)) if match else None
 
 
+LOUDNESS_TARGET_LUFS = -14.0
+LOUDNESS_TOLERANCE_LU = 1.5
+TRUE_PEAK_CEILING = -0.8
+MAX_CAPTION_CPS = 20.0
+
+
+def output_loudness(path: Path) -> dict[str, float | None]:
+    command = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af",
+               "loudnorm=print_format=json", "-f", "null", "-"]
+    stderr = subprocess.run(command, capture_output=True, text=True).stderr
+    match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.S)
+    if not match:
+        return {"integrated_lufs": None, "true_peak_dbtp": None}
+    data = json.loads(match.group(0))
+    as_float = lambda key: float(data[key]) if data.get(key) not in (None, "-inf", "inf") else None
+    return {"integrated_lufs": as_float("input_i"), "true_peak_dbtp": as_float("input_tp")}
+
+
+def parse_detect_events(stderr: str) -> dict[str, list[dict[str, float]]]:
+    freezes = [{"start_s": float(a), "duration_s": float(b)} for a, b in re.findall(
+        r"freeze_start: ([0-9.]+).*?freeze_duration: ([0-9.]+)", stderr, re.S)]
+    blacks = [{"start_s": float(a), "duration_s": float(c)} for a, _b, c in re.findall(
+        r"black_start:([0-9.]+) black_end:([0-9.]+) black_duration:([0-9.]+)", stderr)]
+    return {"freezes": freezes, "black": blacks}
+
+
+def picture_events(path: Path) -> dict[str, list[dict[str, float]]]:
+    """Whole-timeline frozen picture and black stretches."""
+    command = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-an", "-vf",
+               "scale=320:-2,freezedetect=n=0.001:d=2.5,blackdetect=d=0.4:pix_th=0.08",
+               "-f", "null", "-"]
+    return parse_detect_events(subprocess.run(command, capture_output=True, text=True).stderr)
+
+
+def caption_reading(ass_path: Path) -> dict[str, Any]:
+    """Reading speed per caption (word-highlight events merged back into cues)."""
+    cues: list[list[Any]] = []
+    for line in ass_path.read_text(encoding="utf-8-sig").splitlines():
+        if not line.startswith("Dialogue:"):
+            continue
+        parts = line[len("Dialogue:"):].lstrip().split(",", 9)
+        if len(parts) != 10:
+            continue
+        h1, m1, s1 = parts[1].split(":")
+        h2, m2, s2 = parts[2].split(":")
+        start = int(h1) * 3600 + int(m1) * 60 + float(s1)
+        end = int(h2) * 3600 + int(m2) * 60 + float(s2)
+        text = re.sub(r"\{[^}]*\}", "", parts[9]).replace(r"\N", " ").replace("\u200f", "").strip()
+        if cues and cues[-1][2] == text and abs(cues[-1][1] - start) < 0.02:
+            cues[-1][1] = end
+        else:
+            cues.append([start, end, text])
+    fast, short = [], []
+    for start, end, text in cues:
+        duration = max(0.01, end - start)
+        cps = len(text.replace(" ", "")) / duration
+        if cps > MAX_CAPTION_CPS:
+            fast.append({"start_s": round(start, 2), "cps": round(cps, 1), "text": text})
+        if duration < 0.5:
+            short.append({"start_s": round(start, 2), "duration_s": round(duration, 2), "text": text})
+    return {"cues": len(cues), "too_fast": fast, "too_short": short}
+
+
+def pacing_report(edl: dict[str, Any], edit_dir: Path) -> dict[str, Any]:
+    ranges = edl.get("ranges") or []
+    shots = [float(r["end"]) - float(r["start"]) for r in ranges]
+    total = sum(shots)
+    words = 0
+    for r in ranges:
+        path = edit_dir / "transcripts" / f"{r['source']}.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            words += sum(1 for w in data.get("words", []) if w.get("type", "word") == "word"
+                         and float(w.get("start", -1)) >= float(r["start"]) and float(w.get("end", 1e9)) <= float(r["end"]))
+    changes = [0.0, total]
+    cursor = 0.0
+    for r, shot in zip(ranges, shots):
+        cursor += shot
+        changes.append(cursor)
+    for g in (edl.get("graphics") or []) + (edl.get("overlays") or []):
+        if "start_in_output" in g:
+            changes += [float(g["start_in_output"]), float(g["start_in_output"]) + float(g.get("duration", 0))]
+    changes = sorted(c for c in changes if 0 <= c <= total)
+    longest = max((b - a for a, b in zip(changes, changes[1:])), default=total)
+    minutes = total / 60 if total else 0
+    return {
+        "duration_s": round(total, 2),
+        "shots": len(shots),
+        "median_shot_s": round(sorted(shots)[len(shots) // 2], 2) if shots else None,
+        "longest_shot_s": round(max(shots), 2) if shots else None,
+        "words_per_minute": round(words / minutes) if minutes and words else None,
+        "graphics_per_minute": round(len(edl.get("graphics") or []) / minutes, 1) if minutes else None,
+        "longest_static_stretch_s": round(longest, 2),
+    }
+
+
 def output_cut_times(edl: dict[str, Any]) -> list[float]:
     cursor, cuts = 0.0, []
     ranges = edl.get("ranges") or []
@@ -145,6 +241,35 @@ def verify_render(edl_path: Path, output: Path, visual: bool = False) -> dict[st
         report["warnings"].append(f"Audio peak is {peak:.1f} dB; check for clipping.")
 
     edl = json.loads(edl_path.read_text(encoding="utf-8"))
+    edit_dir = edl_path.parent
+    if audio:
+        loud = output_loudness(output)
+        report["loudness"] = loud
+        lufs, tp = loud["integrated_lufs"], loud["true_peak_dbtp"]
+        if lufs is not None and abs(lufs - LOUDNESS_TARGET_LUFS) > LOUDNESS_TOLERANCE_LU:
+            report["warnings"].append(f"Integrated loudness {lufs:.1f} LUFS is off the {LOUDNESS_TARGET_LUFS:.0f} LUFS target.")
+        if tp is not None and tp > TRUE_PEAK_CEILING:
+            report["warnings"].append(f"True peak {tp:.1f} dBTP is above {TRUE_PEAK_CEILING} dBTP.")
+    if video and duration > 0:
+        events = picture_events(output)
+        report["picture_events"] = events
+        for freeze in events["freezes"]:
+            report["warnings"].append(f"Picture frozen for {freeze['duration_s']:.1f}s at {freeze['start_s']:.2f}s.")
+        for black in events["black"]:
+            report["warnings"].append(f"Black picture for {black['duration_s']:.2f}s at {black['start_s']:.2f}s.")
+    ass = None
+    if edl.get("subtitles") and str(edl["subtitles"]).endswith(".ass"):
+        ass = Path(edl["subtitles"]) if Path(edl["subtitles"]).is_absolute() else edit_dir / edl["subtitles"]
+    elif edl.get("captions"):
+        ass = edit_dir / "captions.ass"
+    if ass is not None and ass.is_file():
+        reading = caption_reading(ass)
+        report["captions"] = reading
+        if reading["too_fast"]:
+            report["warnings"].append(f"{len(reading['too_fast'])} caption(s) exceed {MAX_CAPTION_CPS:.0f} characters/second.")
+        if reading["too_short"]:
+            report["warnings"].append(f"{len(reading['too_short'])} caption(s) are on screen under 0.5s.")
+    report["pacing"] = pacing_report(edl, edit_dir)
     report["frame_samples"] = scan_frame_samples(output, duration, output_cut_times(edl)) if video and duration > 0 else []
     suspect_frames = [sample for sample in report["frame_samples"] if sample["nearly_black"]]
     if suspect_frames:
