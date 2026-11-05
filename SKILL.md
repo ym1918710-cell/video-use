@@ -21,7 +21,7 @@ These are the things where deviation produces silent failures or broken output. 
 
 1. **Subtitles are applied LAST in the filter chain**, after every overlay. Otherwise overlays hide captions. Silent failure.
 2. **Per-segment extract → lossless `-c copy` concat**, not single-pass filtergraph. Otherwise you double-encode every segment when overlays are added.
-3. **30ms audio fades at every segment boundary** (`afade=t=in:st=0:d=0.03,afade=t=out:st={dur-0.03}:d=0.03`). Otherwise audible pops at every cut.
+3. **Equal-power audio crossfade at every cut** (default 30ms, `audio.crossfade_ms` 4–200, centered on the picture cut; `render.py` builds the audio as one PCM master and encodes AAC once). Never fade each side to silence — a dip to zero makes room tone and music beds audibly gate, and per-segment AAC adds gaps at every boundary.
 4. **Overlays use `setpts=PTS-STARTPTS+T/TB`** to shift the overlay's frame 0 to its window start. Otherwise you see the middle of the animation during the overlay window.
 5. **Master SRT uses output-timeline offsets**: `output_time = word.start - segment_start + segment_offset`. Otherwise captions misalign after segment concat.
 6. **Never cut inside a word.** Snap every cut edge to a word boundary from the Scribe transcript.
@@ -31,6 +31,7 @@ These are the things where deviation produces silent failures or broken output. 
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
 11. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
 12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
+13. **Every render is guarded.** Initialize session state, validate the EDL, render, then write a QC report. Use `helpers/run_edit.py`; do not call `render.py` directly unless diagnosing the renderer itself.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
@@ -43,6 +44,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 ├── <source files, untouched>
 └── edit/
     ├── project.md               ← memory; appended every session
+    ├── editorial_plan.json      ← protected moments + proposed B-roll/SFX + effect reasons
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
     ├── edl.json                 ← cut decisions
     ├── transcripts/<name>.json  ← cached raw Scribe JSON
@@ -69,6 +71,18 @@ First-time install lives in `install.md` (clone, deps, ffmpeg, skill registratio
 
 Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this SKILL.md. Resolve their paths relative to the directory containing this file — the skill is typically symlinked at `~/.claude/skills/video-use/` or `~/.codex/skills/video-use/`.
 
+## Persistent editorial memory
+
+Before proposing any edit, read [editorial memory](references/editorial-memory.md). It is the agent's durable base knowledge for pacing, styles, transitions, captions, sound, and visual emphasis.
+
+- Read [delivery memory](references/delivery-memory.md) whenever the destination, aspect ratio, safe areas, frame rate, or export format matters.
+- Read [color memory](references/color-memory.md) whenever correction, matching, HDR/SDR conversion, or a creative grade is requested.
+- Read the [style library](references/style-library.md) before proposing a strategy. It lists the signals that decide a style and the layer-by-layer recipes (kinetic promo, static Q&A, clean authority, native short-form, story, demo, montage). Styles belong to no client.
+- Read [brand identity](references/brand-identity.md) when a client, logo, colours, fonts, or reference exports are involved. Each project's `brand_kit.json` holds the client's tokens. Leave it empty for a brand-neutral edit, and never carry one client's identity into another project.
+- When the user shares finished videos as a quality or style reference, run `analyze_references.py` and follow "Learning a new style from references" in the style library. Put reusable craft in the library and client look in the brand kit.
+- Treat `style_profile.json` as creator-specific overrides. It begins intentionally empty; add a preference there only when the user explicitly approves it or repeated feedback demonstrates it. User preference wins over these references.
+- Do not dump the memory catalog into a response. Select a fitting approach, say what it will achieve, and document non-obvious choices in `editorial_plan.json`.
+
 ## Helpers
 
 - **`transcribe.py <video>`** — single-file Scribe call. `--num-speakers N` optional. Cached.
@@ -77,24 +91,32 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`session_state.py <edit_dir>`** — creates the persistent brief, style profile, and lifecycle state without overwriting existing preferences.
+- **`validate_edl.py <edl.json>`** — rejects invalid sources, ranges, and overlay windows before a render; writes `validation_report.json`.
+- **`verify_render.py <edl.json> <output>`** — checks the rendered media against the EDL and writes `qc_report.json`. Pass `--visual` to produce cut-boundary filmstrips for the agent's visual readback.
+- **`run_edit.py <edl.json> -o <out>`** — preferred guarded route: initialize → validate → render → QC. Pass `--visual-qc` for a final visual check.
+- **`review_editorial_plan.py <edl.json>`** — checks protected moments and asset-approval status, then writes `editorial_review.json`. `run_edit.py` performs this advisory review automatically.
+- **`graphics.py`** — renders the EDL's `graphics` (stickers, numbers, headlines, lower thirds, logo, end card) from `brand_kit.json` tokens; called by `render.py`.
+- **`analyze_references.py <files|dir> -o reference_analysis.json`** — measures finished reference videos (format, shot length, loudness, silence, dominant colours) so a style or brand kit can be learned from examples.
+- **`person_mask.py <video> -o <mask.mkv>`** — uses local macOS Vision to create a frame-accurate person matte. No footage is uploaded.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
 ## The process
 
-1. **Inventory.** `ffprobe` every source. `transcribe_batch.py` on the directory. `pack_transcripts.py` to produce `takes_packed.md`. Sample one or two `timeline_view`s for a visual first impression.
+1. **Initialize + recall + inventory.** Read the persistent editorial memory relevant to the request, then run `session_state.py <edit_dir>` once; it never overwrites an existing brief or style profile. Read any existing `style_profile.json` and `editorial_plan.json` before choosing an approach. `ffprobe` every source. `transcribe_batch.py` on the directory. `pack_transcripts.py` to produce `takes_packed.md`. Sample one or two `timeline_view`s for a visual first impression.
 2. **Pre-scan for problems.** One pass over `takes_packed.md` to note verbal slips, obvious mis-speaks, or phrasings to avoid. Plain list, feed into the editor brief.
 3. **Converse.** Describe what you see in plain English. Ask questions *shaped by the material*. Collect: content type, target length/aspect, aesthetic/brand direction, pacing feel, must-preserve moments, must-cut moments, animation and grade preferences, subtitle needs. Do not use a fixed checklist — the right questions are different every time.
-4. **Propose strategy.** 4–8 sentences: shape, take choices, cut direction, animation plan, grade direction, subtitle style, length estimate. **Wait for confirmation.**
-5. **Execute.** Produce `edl.json` via the editor sub-agent brief. Drill into `timeline_view` at ambiguous moments. Build animations in parallel sub-agents. Apply grade per-segment. Compose via `render.py`.
-6. **Preview.** `render.py --preview`.
+4. **Propose strategy.** Shortlist 2–3 style recipes from the style library's signals and recommend one, giving a reason tied to this material. Name the brand identity it will wear (or say it is brand-neutral). Then give 4–8 sentences: shape, take choices, cut direction, animation plan, grade direction, subtitle style, length estimate. **Wait for confirmation.** Record the chosen recipe in `style_profile.json` → `style`.
+5. **Execute.** Update `edit_brief.json` and `style_profile.json` with approved choices, then produce `edl.json` via the editor sub-agent brief. Drill into `timeline_view` at ambiguous moments. Build animations in parallel sub-agents. Apply grade per-segment. Use `validate_edl.py` to repair factual EDL errors before rendering.
+6. **Preview.** Run `run_edit.py edl.json -o preview.mp4 --preview --visual-qc`; this is the required render path.
 7. **Self-eval (before showing the user).** Run `timeline_view` on the **rendered output** (not the sources) at every cut boundary (±1.5s window). Check each image for:
    - Visual discontinuity / flash / jump at the cut
-   - Waveform spike at the boundary (audio pop that slipped past the 30ms fade)
+   - Waveform spike or dip at the boundary (pop or gating the crossfade did not hide)
    - Subtitle hidden behind an overlay (Rule 1 violation)
    - Overlay misaligned or showing wrong frames (Rule 4 violation)
 
-   Also sample: first 2s, last 2s, and 2–3 mid-points — check grade consistency, subtitle readability, overall coherence. Run `ffprobe` on the output to verify duration matches the EDL expectation.
+   Read `qc_report.json` first: it records output duration, stream presence, audio peak, validation results, and conservative nearly-black-frame signals at the start, end, and each cut. A nearly-black signal is a review prompt, not an automatic rejection—fades and intentional black scenes are valid. Also sample: first 2s, last 2s, and 2–3 mid-points — check grade consistency, subtitle readability, overall coherence. The QC report is factual evidence; the visual read remains an editorial judgment.
 
    If anything fails: fix → re-render → re-eval. **Cap at 3 self-eval passes** — if issues remain after 3, flag them to the user rather than looping forever. Only present the preview once the self-eval passes.
 8. **Iterate + persist.** Natural-language feedback, re-plan, re-render. Never re-transcribe. Final render on confirmation. Append to `project.md`.
@@ -108,6 +130,15 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 - **Silence gaps are cut candidates.** Silences ≥400ms are usually the cleanest. 150–400ms phrase boundaries are usable with a visual check. <150ms is unsafe (mid-phrase).
 - **Example cut padding** (the launch video shipped with this): 50ms before the first kept word, 80ms after the last. Tighter for montage energy, looser for documentary. Stay in the 30–200ms working window (Hard Rule 7).
 - **Never reason audio and video independently.** Every cut must work on both tracks.
+
+## Editorial decision contract
+
+For every non-trivial decision, record the viewer-facing reason in the EDL or `editorial_plan.json`: what the viewer should notice, why this exact moment earns attention, and what visual or audio risk was checked. Do not add an effect merely because a keyword occurred.
+
+- **Punch-in:** Use only to emphasize a turn in meaning, a key proof, or a strong reaction. Add `"punch_in": {"scale": 1.08, "reason": "..."}` to a selected range. The renderer supports a restrained 1.03–1.20× punch-in cropped from the source pixels; add `anchor_x` / `anchor_y` (0–1) to keep the face, not the frame centre, in the crop. Inspect the source first for headroom and on-screen graphics. On a jump cut inside one take, alternating framing (e.g. 1.0 → 1.1) makes the cut read as intentional. Return to normal framing at the next editorial beat.
+- **Hero moments:** Flag demonstrations, emotional reactions, jokes, and key evidence as protected. Do not use silence removal or jump cuts that damage them; use a hold, a reaction, a J/L cut, or B-roll cover instead.
+- **B-roll / SFX:** Write proposed items to `editorial_plan.json` with `start_in_output`, `duration`, `purpose`, `source_or_query`, and `status: "proposed"`. Only turn an item into an overlay after the user provides or approves a licensed asset. Never silently fetch stock footage or use sound effects to disguise a weak cut.
+- **Decision limit:** Prefer one clear visual idea per beat. If an effect does not clarify, pace, or emotionally support the story, leave it out.
 
 ## The packed transcript (primary reading view)
 
@@ -181,18 +212,65 @@ Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sente
 
 **Worked styles** — pick, adapt, or invent:
 
-**`bold-overlay`** — short-form tech launch, fast-paced social. 2-word chunks, UPPERCASE, break on punctuation, Helvetica 18 Bold, white-on-outline, `MarginV=35`. `render.py` ships with this as `SUB_FORCE_STYLE`.
+**`bold-overlay`** — short-form tech launch, fast-paced social. 2-word chunks, UPPERCASE, break on punctuation, Helvetica 18 Bold, white-on-outline, `MarginV=90` (clears the vertical-app UI). `render.py` ships with this as `SUB_FORCE_STYLE`.
 
 ```
 FontName=Helvetica,FontSize=18,Bold=1,
 PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,
 BorderStyle=1,Outline=2,Shadow=0,
-Alignment=2,MarginV=35
+Alignment=2,MarginV=90
 ```
 
 **`natural-sentence`** (if you invent this mode) — narrative, documentary, education. 4–7 word chunks, sentence case, break on natural pauses, `MarginV=60–80`, larger font for readability, slightly wider max-width. No shipped force_style — design one if you need it.
 
 Invent a third style if neither fits. Hard rules: subtitles LAST (Rule 1), output-timeline offsets (Rule 5).
+
+### Arabic captions
+
+For Arabic, do **not** use the generic `--build-subtitles` output: it forces two-word uppercase SRT intended for fast English overlays. Build an ASS file instead:
+
+```bash
+python helpers/build_captions.py edit/edl.json -o edit/master_ar.ass --font "<approved Arabic font>"
+```
+
+Set the EDL `subtitles` field to that `.ass` file, then render through `run_edit.py`. The renderer preserves ASS typography and lets libass handle RTL shaping. Keep chunks to 3–5 words, preserve the original dialect and Unicode text, and check mixed Arabic/Latin words, numbers, punctuation, and safe-area placement in the visual QC filmstrips. Do not uppercase Arabic or manually reverse its characters.
+
+## Subject in front of graphs or text
+
+Use `behind_subject_overlays` when a graph, animated label, or visual must appear behind the person. Video Use creates a local macOS Vision person matte from the assembled base video, draws these layers, restores the person as the foreground, then applies ordinary `overlays` and subtitles on top.
+
+```json
+"subject_mask": {"mode": "person", "quality": "balanced"},
+"behind_subject_overlays": [
+  {"file": "animations/chart/render.mov", "start_in_output": 3.2, "duration": 4.0, "x": "0", "y": "0"}
+]
+```
+
+The mask inherits the assembled video's frame rate by default; set `fps` only for an intentional override. Use `fast` only for previews and `accurate` for difficult hair, hands, or movement. Inspect the output around every entrance/exit and moving arm; masking is never assumed perfect. Keep the graph/text clear of the face and use a conventional top overlay instead if the visual does not need to pass behind the person.
+
+## Brand graphics (`graphics` in the EDL)
+
+For stickers, kinetic numbers, headlines, lower thirds, a logo bug, and end cards, describe **what and when** in the EDL. Leave **how it looks** to the project's `brand_kit.json` (see [brand identity](references/brand-identity.md)). If the kit is empty, everything renders brand-neutral. Re-dressing the same edit for another client only means swapping the kit, not touching the EDL.
+
+```json
+"graphics": [
+  {"type": "headline", "text": "إزاي بتفهم\nالـKPIs؟", "start_in_output": 0.3, "duration": 2.9, "position": {"x": 0.5, "y": 0.2}, "behind_subject": true},
+  {"type": "sticker", "text": "Free Bootcamp", "at": {"source": "C0103", "time": 41.30}, "duration": 1.6, "position": "upper_third"},
+  {"type": "number", "text": "5", "label": "أيام", "start_in_output": 15.05, "duration": 2.0, "position": {"x": 0.74, "y": 0.42}},
+  {"type": "lower_third", "title": "محمد", "subtitle": "Data Analyst", "start_in_output": 7.1, "duration": 2.0},
+  {"type": "title_card", "text": "السؤال؟", "start_in_output": 0, "duration": 3.5},
+  {"type": "logo", "start_in_output": 0, "duration": 27.9},
+  {"type": "end_card", "text": "اكتب data في الكومنتس", "start_in_output": 27.9, "duration": 1.0}
+]
+```
+
+- **Types:** `sticker`, `title_card`, `number` (+`label`), `headline` (`\n` for two lines), `lower_third` (`title`, `subtitle`), `logo` (from the kit, or `file`), and `end_card` (full frame, with the kit's logo + `text`).
+- **Timing:** use `start_in_output`, or `at: {source, time}` to land on a spoken word from the transcript. The renderer maps it through the kept ranges, so it stays correct after re-cuts.
+- **Position:** `top`, `top_center`, `upper_third`, `center`, `lower_third`, `bottom`, or `{x, y}` (the element's centre, 0–1). Positions are clamped to the safe area, and vertical canvases keep clear of the platform UI at the bottom.
+- **Motion:** `animation` is one of `pop`, `rise`, `slide`, `fade`, `none`. Defaults depend on the type, and timing follows the kit's `motion.energy` (`calm` / `medium` / `high`). Optional `tilt` (degrees) and `scale`.
+- **Behind the subject:** `"behind_subject": true` puts the element behind the person. The person mask is created automatically. Check that the face stays clear.
+- **Rendering:** text goes through macOS CoreText, so Arabic, mixed Arabic/Latin, and any installed or brand-supplied font (`.ttf`/`.otf` path in the kit) shape correctly. Pick an Arabic font that has bold weights. Elements are cached in `<edit>/graphics/`.
+- The style recipe decides **how many** graphics to use and where (see the style library). Give each one a job: one idea per beat, and land it on the word it supports. Don't stack a sticker, number, and punch-in on the same beat.
 
 ## Animations (when requested)
 
@@ -263,7 +341,7 @@ One sub-agent = one file (unique filenames, parallel agents don't overwrite each
 
 ## Output spec
 
-Match the source unless the user asked for something specific. Common targets: `1920×1080@24` cinematic, `1920×1080@30` screen content, `1080×1920@30` vertical social, `3840×2160@24` 4K cinema, `1080×1080@30` square. `render.py` defaults the scale to 1080p from any source; pass `--filter` or edit the extract command for other targets. Worth asking the user which delivery format matters.
+Match the source unless the user asked for something specific. Common targets: `1920×1080@24` cinematic, `1920×1080@30` screen content, `1080×1920@30` vertical social, `3840×2160@24` 4K cinema, `1080×1080@30` square. `render.py` conforms every segment to ONE canvas: the EDL `canvas` (`{"width": 1080, "height": 1920}`) or, by default, 1920×1080 / 1080×1920 following the first source's orientation. Per-source `source_framing` chooses `cover` (crop at `anchor_x`/`anchor_y`, default), `fit` (bars), or `blur_fit` (fit over a blurred fill). Mixed-orientation sources are allowed; the validator warns when a cover crop on a mismatched source has no chosen anchor. Worth asking the user which delivery format matters.
 
 ## EDL format
 
@@ -275,8 +353,14 @@ Match the source unless the user asked for something specific. Common targets: `
     {"source": "C0103", "start": 2.42, "end": 6.85,
      "beat": "HOOK", "quote": "...", "reason": "Cleanest delivery, stops before slip at 38.46."},
     {"source": "C0108", "start": 14.30, "end": 28.90,
-     "beat": "SOLUTION", "quote": "...", "reason": "Only take without the false start."}
+     "beat": "SOLUTION", "quote": "...", "reason": "Only take without the false start."},
+    {"source": "C0108", "start": 31.20, "end": 35.00,
+     "beat": "PROOF", "quote": "...", "reason": "Key demonstration.",
+     "punch_in": {"scale": 1.08, "anchor_y": 0.4, "reason": "Draws focus to the proof without cropping the UI."}}
   ],
+  "canvas": {"width": 1080, "height": 1920},
+  "source_framing": {"C0108": {"mode": "cover", "anchor_x": 0.45}},
+  "audio": {"crossfade_ms": 30},
   "grade": "warm_cinematic",
   "overlays": [
     {"file": "edit/animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
@@ -286,7 +370,7 @@ Match the source unless the user asked for something specific. Common targets: `
 }
 ```
 
-`grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+`grade` is a preset name, a raw ffmpeg filter, or `auto` (a bounded correction measured once per source, so every range of one take shares it). `canvas`, `source_framing`, and `audio` are optional. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
 
 ## Memory — `project.md`
 
@@ -301,7 +385,7 @@ Append one section per session at `<edit>/project.md`:
 **Outstanding:** deferred items
 ```
 
-On startup, read `project.md` if it exists and summarize the last session in one sentence before asking whether to continue.
+On startup, read `session_state.json`, `edit_brief.json`, and `style_profile.json` first. Then read `project.md` if it exists and summarize the last session in one sentence before asking whether to continue. Structured state is authoritative for current status and user preferences; prose explains past judgment.
 
 ## Anti-patterns
 
