@@ -61,11 +61,19 @@ Principles that hold for everything below:
 | E2 | Hand-off to an NLE | `export_timeline.py` → CMX3600 `.edl` and FCP7 `.xml`, for Premiere and Resolve with automatic relink. |
 | E3 | Take comparison | `compare_takes.py`: finds repeated phrases across takes, then ranks them by length, fillers, and pace. |
 
-## Later (needs assets or a bigger decision)
-- Moving face tracking inside a single shot (dynamic crop).
-- A licensed music/SFX library with mood tags. For now we only use files the user supplies.
-- Automatic shot matching between two different cameras.
-- Speaker diarization for automatic switching between multicam angles.
+## Round 3 — done
+| Item | Where |
+|---|---|
+| Smooth keyframed zoom in / out and pans (eased, subpixel `perspective`) | `camera.py`, range `zoom` / `camera` |
+| Face tracking inside a shot (low-passed path, locked off when still) | range `track: "face"` |
+| Colour match between cameras (levels + gamma per channel) | `grade.match` |
+| Multicam: audio sync and cuts to the speaker, master sound kept | `multicam.py`, range `audio_source` |
+| Licensed music/SFX library: tempo, energy, mood tags, recipe suggestions | `library.py`, `library:<id>` |
+| Linux: Pillow + libraqm text engine, OpenCV face fallback | `text_render.py`, extra `linux` |
+
+## Still open
+- A person matte on Linux (`behind_subject` is macOS Vision only).
+- Taste review on real client projects: caption size, ducking depth, how often to move the camera.
 
 ## Definition of done (met)
 - All tests pass, plus new tests for every item.

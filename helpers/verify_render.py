@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from validate_edl import validate_edl
+from transcripts import transcript_path
 
 
 def frame_luma(path: Path, timestamp: float) -> dict[str, float] | None:
@@ -143,7 +144,8 @@ def pacing_report(edl: dict[str, Any], edit_dir: Path) -> dict[str, Any]:
     total = sum(shots)
     words = 0
     for r in ranges:
-        path = edit_dir / "transcripts" / f"{r['source']}.json"
+        sound = r.get("audio_source") if isinstance(r.get("audio_source"), dict) else None
+        path = transcript_path(edit_dir, edl, sound["source"] if sound else r["source"])
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             words += sum(1 for w in data.get("words", []) if w.get("type", "word") == "word"
@@ -270,6 +272,20 @@ def verify_render(edl_path: Path, output: Path, visual: bool = False) -> dict[st
         if reading["too_short"]:
             report["warnings"].append(f"{len(reading['too_short'])} caption(s) are on screen under 0.5s.")
     report["pacing"] = pacing_report(edl, edit_dir)
+    try:
+        from sfx_library import effect_events, silent_effects
+        from graphics import load_brand_kit, output_time
+        brand = load_brand_kit(edl, edit_dir)
+        rate = str(edl.get("fps") or "30")
+        effects = effect_events(edl, rate, brand)
+        silent = silent_effects(edl, rate, brand, resolve_at=lambda at: output_time(edl, at, rate))
+        report["effect_sound"] = {"effects": len(effects), "auto_sfx": (edl.get("audio") or {}).get("auto_sfx") is not False,
+                                  "silent": [{"time_s": round(e["time"], 2), "kind": e["kind"], "label": e["label"]} for e in silent]}
+        if silent:
+            report["warnings"].append(f"{len(silent)} visual effect(s) have no sound effect: "
+                                      + ", ".join(f"{e['kind']} @ {e['time']:.2f}s" for e in silent[:6]))
+    except Exception as exc:  # QC must never crash the render
+        report["effect_sound"] = {"error": str(exc)}
     report["frame_samples"] = scan_frame_samples(output, duration, output_cut_times(edl)) if video and duration > 0 else []
     suspect_frames = [sample for sample in report["frame_samples"] if sample["nearly_black"]]
     if suspect_frames:

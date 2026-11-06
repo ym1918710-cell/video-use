@@ -18,6 +18,8 @@ Cloud-hosted video-use is coming. [Join the waitlist at video-use.com](https://v
 - **Burns subtitles** in your style — 2-word UPPERCASE chunks by default, fully customizable
 - **Brand-driven graphics** — stickers, kinetic numbers, headlines (even behind the speaker), lower thirds, logo bug, end card — dressed by a per-client `brand_kit.json`; one edit, any identity
 - **Mixes like a post house** — dialogue chain, music bed that ducks under speech and breathes in pauses, SFX accents, J/L cuts, stems
+- **Smooth camera moves** — keyframed zoom in / out and pans with real easing (subpixel, no zoompan shake), and face tracking inside a shot
+- **Multicam** — syncs angles by audio and cuts to whoever is speaking; matches colour between cameras
 - **Reframes on the face** — 16:9 → 9:16 / 4:5 crops and alternating punch-ins on jump cuts follow the speaker (local Vision)
 - **One cut, every deliverable** — extra canvases, CMX3600 / FCP7 XML hand-off to Premiere or Resolve
 - **Picks a style for the material** from a general style library, and learns new styles from reference videos

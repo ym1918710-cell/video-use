@@ -83,6 +83,11 @@ class MotionAndLayoutTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             graphics.output_time(edl, {"source": "A", "time": 20}, "30")
 
+    def test_anchor_on_broll_follows_its_audio_source(self):
+        edl = {"ranges": [{"source": "A", "start": 0, "end": 2},
+                          {"source": "BROLL", "start": 50, "end": 52, "audio_source": {"source": "A", "start": 2.0}}]}
+        self.assertEqual(graphics.output_time(edl, {"source": "A", "time": 3.0}, "30"), 3.0)
+
 
 class ValidationTests(unittest.TestCase):
     def codes(self, element, total=10.0):

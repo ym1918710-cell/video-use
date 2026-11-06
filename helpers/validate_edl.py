@@ -13,6 +13,8 @@ import math
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from typing import Any
 
 
@@ -144,6 +146,10 @@ def validate_framing(
         if (source_framing.get("mode", "cover") != "cover" or "anchor_x" in source_framing
                 or source_framing.get("anchor") == "face"):
             continue
+        # Ranges that place their own window (camera x keys / face tracking) chose the crop.
+        own = [r for r in edl.get("ranges") or [] if isinstance(r, dict) and r.get("source") == source_id]
+        if own and all(r.get("track") == "face" or any("x" in k for k in r.get("camera") or []) for r in own):
+            continue
         size = probe_display_size(resolve_path(raw_path, base))
         if size and (size[1] > size[0]) != canvas_portrait:
             report["warnings"].append(issue(
@@ -154,18 +160,36 @@ def validate_framing(
             ))
 
 
-TRANSITION_TYPES = {"dissolve", "dip_black", "dip_white", "whip", "slide", "zoom", "wipe"}
+TRANSITION_TYPES = {"dissolve", "dip_black", "dip_white", "whip", "slide", "zoom", "wipe", "light", "fade"}
 
 
 def validate_extras(edl: dict[str, Any], base: Path) -> list[tuple[str, str, str, str]]:
     """Transitions, J/L cuts, auto punch, LUT grade, captions, deliverables."""
+    from camera import validate_motion
     out: list[tuple[str, str, str, str]] = []
+    sources = edl.get("sources") or {}
+    rules = edl.get("transitions")
+    if rules is not None:
+        broll = rules.get("broll") if isinstance(rules, dict) else None
+        kind = broll if isinstance(broll, str) else (broll or {}).get("type") if isinstance(broll, dict) else None
+        if not isinstance(rules, dict) or (broll is not None and kind not in TRANSITION_TYPES):
+            out.append(("error", "invalid_transition", f'transitions.broll needs a type from {sorted(TRANSITION_TYPES)}.', "transitions"))
     for i, r in enumerate(edl.get("ranges") or []):
         if not isinstance(r, dict):
             continue
         path = f"ranges[{i}]"
+        out += validate_motion(r, path)
+        audio_source = r.get("audio_source")
+        if audio_source is not None:
+            try:
+                if not isinstance(audio_source, dict) or audio_source.get("source") not in sources:
+                    raise ValueError
+                if float(audio_source.get("start", 0)) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                out.append(("error", "invalid_audio_source", "audio_source needs a known source and start ≥ 0.", f"{path}.audio_source"))
         transition = r.get("transition")
-        if transition is not None:
+        if transition is not None and transition is not False and transition != "cut":
             spec = {"type": transition} if isinstance(transition, str) else transition
             if i == 0:
                 out.append(("error", "invalid_transition", "The first range has no incoming cut to transition.", f"{path}.transition"))
@@ -177,6 +201,12 @@ def validate_extras(edl: dict[str, Any], base: Path) -> list[tuple[str, str, str
                         raise ValueError
                 except (TypeError, ValueError):
                     out.append(("error", "invalid_transition", "duration_ms must be 80–2000.", f"{path}.transition.duration_ms"))
+        if r.get("audio_gain_db") is not None:
+            try:
+                if not -24 <= float(r["audio_gain_db"]) <= 12:
+                    raise ValueError
+            except (TypeError, ValueError):
+                out.append(("error", "invalid_audio_gain", "audio_gain_db must be -24..12 dB.", f"{path}.audio_gain_db"))
         for key in ("j_cut_ms", "l_cut_ms"):
             if r.get(key) is None:
                 continue
@@ -207,6 +237,16 @@ def validate_extras(edl: dict[str, Any], base: Path) -> list[tuple[str, str, str
                 raise ValueError
         except (TypeError, ValueError):
             out.append(("error", "invalid_grade", "grade.intensity must be 0–1.", "grade.intensity"))
+    if isinstance(grade, dict) and grade.get("match") is not None and grade["match"] not in sources:
+        out.append(("error", "invalid_grade", "grade.match must name a source (the reference camera).", "grade.match"))
+    multicam = edl.get("multicam")
+    if multicam is not None:
+        if not isinstance(multicam, dict) or multicam.get("master") not in sources or not isinstance(multicam.get("angles"), dict):
+            out.append(("error", "invalid_multicam", "multicam needs master (a source) and angles {source: {speaker|wide}}.", "multicam"))
+        else:
+            for name in multicam["angles"]:
+                if name not in sources:
+                    out.append(("error", "invalid_multicam", f"angle {name!r} is not a source.", f"multicam.angles.{name}"))
     captions = edl.get("captions")
     if captions is not None and not isinstance(captions, (bool, dict)):
         out.append(("error", "invalid_captions", "captions must be true or an object of caption-skin overrides.", "captions"))
@@ -298,7 +338,15 @@ def validate_edl(edl_path: Path) -> dict[str, Any]:
                 if not str(punch_in.get("reason", "")).strip():
                     report["warnings"].append(issue("warning", "punch_in_without_reason", "Record why this punch-in helps the edit.", f"{item_path}.punch_in.reason"))
         total += end - start
-        report["warnings"].extend(transcript_edge_warning(base / "transcripts" / f"{source_id}.json", start, end, source_duration))
+        # Cut edges are checked where the *sound* comes from (B-roll keeps the
+        # interview's audio through audio_source).
+        from transcripts import transcript_path
+        sound = item.get("audio_source") if isinstance(item.get("audio_source"), dict) else None
+        if sound and sound.get("source") in sources:
+            s_start = float(sound.get("start", start))
+            report["warnings"].extend(transcript_edge_warning(transcript_path(base, edl, sound["source"]), s_start, s_start + end - start, None))
+        else:
+            report["warnings"].extend(transcript_edge_warning(transcript_path(base, edl, source_id), start, end, source_duration))
 
     report["expected_duration_s"] = round(total, 3)
     declared = edl.get("total_duration_s")

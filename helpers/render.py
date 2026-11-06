@@ -31,6 +31,8 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from grade import get_preset, auto_grade_for_ranges  # same directory
@@ -410,6 +412,31 @@ def probe_source_fps(video: Path) -> str | None:
 # -------- Per-segment extraction (Rule 2 + Rule 3) --------------------------
 
 
+def camera_chain(canvas: tuple[int, int], size: tuple[int, int] | None, punch_in: dict | None,
+                 framing: dict | None, motion: dict | None, source: Path) -> str | None:
+    """Keyframed zoom / pan / face tracking for this range, or None if static."""
+    if not motion or size is None or (framing or {}).get("mode", "cover") != "cover":
+        return None
+    from camera import camera_filter, normalize_keys
+    sw, sh = size
+    W, H = canvas
+    target = W / H
+    cw, ch = (sh * target, float(sh)) if sw / sh > target else (float(sw), sw / target)
+    face = (punch_in or {}).get("face_center") or (framing or {}).get("face_center")
+    if face:
+        base = (float(face[0]), float(face[1]))
+    else:
+        ax = _unit((punch_in or {}).get("anchor_x", (framing or {}).get("anchor_x", 0.5)))
+        ay = _unit((punch_in or {}).get("anchor_y", (framing or {}).get("anchor_y", 0.5)))
+        # Same window position the static crop would choose for this anchor.
+        base = (((sw - cw) * ax + cw / 2) / sw, ((sh - ch) * ay + ch * FACE_HEADROOM) / sh)
+    keys = normalize_keys(motion["spec"], base, motion["duration"], motion.get("track"))
+    if keys is None:
+        return None
+    fps = float(Fraction(probe_source_fps(source) or "30"))
+    return camera_filter(canvas, size, keys, fps, motion.get("t_offset", 0.0), FACE_HEADROOM)
+
+
 def extract_segment(
     source: Path,
     seg_start: float,
@@ -425,6 +452,7 @@ def extract_segment(
     framing: dict | None = None,
     frames: int | None = None,
     include_audio: bool = True,
+    motion: dict | None = None,
 ) -> None:
     """Extract a cut range as its own MP4, conformed to the canvas and graded.
 
@@ -462,7 +490,8 @@ def extract_segment(
         vf_parts.append("transpose=1")
     elif rotation == "ccw":
         vf_parts.append("transpose=2")
-    vf_parts.append(framing_filter(canvas, size, punch_in, framing))
+    camera = camera_chain(canvas, size, punch_in, framing, motion, source)
+    vf_parts.append(camera or framing_filter(canvas, size, punch_in, framing))
     if grade_filter:
         vf_parts.append(grade_filter)
     vf = ",".join(vf_parts)
@@ -525,6 +554,24 @@ def lut_filter(grade: dict, edit_dir: Path) -> str:
             f"[vu_lut_a][vu_lut_l]blend=all_expr='A*{1 - intensity:.3f}+B*{intensity:.3f}'")
 
 
+def camera_match_filters(edl: dict, edit_dir: Path, reference: str, only: list | None = None) -> dict[str, str]:
+    """Match every other camera's levels and white balance to ``reference``."""
+    from grade import match_filter, rgb_percentiles
+    ranges, sources = edl["ranges"], edl["sources"]
+    spans = lambda name: [(float(r["start"]), float(r["end"]) - float(r["start"])) for r in ranges if r["source"] == name]
+    if reference not in sources:
+        raise ValueError(f"grade.match references unknown source {reference!r}")
+    ref_spans = spans(reference) or [(0.0, min(10.0, probe_media_duration(resolve_path(sources[reference], edit_dir)) or 10.0))]
+    ref_stats = rgb_percentiles(resolve_path(sources[reference], edit_dir), ref_spans)
+    filters = {}
+    for name in dict.fromkeys(r["source"] for r in ranges):
+        if name == reference or (only is not None and name not in only):
+            continue
+        filters[name] = match_filter(rgb_percentiles(resolve_path(sources[name], edit_dir), spans(name)), ref_stats)
+        print(f"  colour match {name} → {reference}: {filters[name]}")
+    return filters
+
+
 def range_looks(edl: dict, edit_dir: Path) -> list[tuple[dict | None, dict | None]]:
     """Per-range (punch_in, framing) after auto punch-ins and face anchors."""
     from face_anchor import needs_faces, plan_auto_punch, range_face_centers
@@ -538,6 +585,7 @@ def range_looks(edl: dict, edit_dir: Path) -> list[tuple[dict | None, dict | Non
         except (RuntimeError, OSError, subprocess.CalledProcessError, ValueError) as exc:
             print(f"  face anchoring unavailable ({exc}); using configured anchors")
     looks = []
+    rotations = edl.get("source_rotations") or {}
     for i, r in enumerate(ranges):
         framing = dict(source_framing.get(r["source"]) or {})
         punch = dict(punches[i]) if punches[i] else None
@@ -546,7 +594,24 @@ def range_looks(edl: dict, edit_dir: Path) -> list[tuple[dict | None, dict | Non
             framing["face_center"] = center
         if punch and center and punch.get("anchor", "face" if punch.get("auto") else None) == "face":
             punch["face_center"] = center
-        looks.append((punch, framing or None))
+        motion = None
+        if r.get("zoom") or r.get("camera") or r.get("track"):
+            spec = {k: r[k] for k in ("zoom", "camera") if r.get(k)}
+            if punch:
+                spec["punch_in"] = punch
+            start, end = float(r["start"]), float(r["end"])
+            motion = {"spec": spec, "duration": end - start}
+            if r.get("track") == "face":
+                try:
+                    from camera import smooth_track
+                    from face_anchor import track_samples
+                    src = resolve_path(edl["sources"][r["source"]], edit_dir)
+                    samples = track_samples(src, start, end, edit_dir / "faces" / f"{r['source']}.json",
+                                            rotations.get(r["source"]))
+                    motion["track"] = smooth_track(samples)
+                except (RuntimeError, OSError, subprocess.CalledProcessError, ValueError) as exc:
+                    print(f"  face tracking unavailable ({exc}); static framing kept")
+        looks.append((punch, framing or None, motion))
     return looks
 
 
@@ -567,8 +632,15 @@ def extract_all_segments(
     """
     grade_field = edl.get("grade")
     lut_chain = ""
+    match_reference = None
+    match_sources = None
+    skip_grade: set[str] = set()
     if isinstance(grade_field, dict):
         lut_chain = lut_filter(grade_field, edit_dir)
+        match_reference = grade_field.get("match")
+        match_sources = grade_field.get("match_sources")
+        # Finished client assets (an outro, a supplied B-roll) keep their look.
+        skip_grade = set(grade_field.get("skip") or [])
         grade_field = grade_field.get("base")
     resolved = resolve_grade_filter(grade_field)
     is_auto = resolved == "__AUTO__"
@@ -592,7 +664,7 @@ def extract_all_segments(
     source_grades: dict[str, str] = {}
     if is_auto:
         print("  (auto-grade per source: analyzing all ranges of each source)")
-        for src_name in dict.fromkeys(r["source"] for r in ranges):
+        for src_name in dict.fromkeys(r["source"] for r in ranges if r["source"] not in skip_grade):
             spans = [
                 (float(r["start"]), float(r["end"]) - float(r["start"]))
                 for r in ranges if r["source"] == src_name
@@ -602,6 +674,12 @@ def extract_all_segments(
             print(f"        {src_name} grade: {source_grades[src_name] or '(none)'}")
 
     looks = range_looks(edl, edit_dir)
+    match_filters = camera_match_filters(edl, edit_dir, match_reference, match_sources) if match_reference else {}
+    if match_reference and is_auto:
+        # One look for every camera: matched sources take the reference's correction.
+        for name in list(source_grades):
+            if name != match_reference:
+                source_grades[name] = source_grades.get(match_reference, "")
 
     seg_paths: list[Path] = []
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/  @ {out_rate} fps"
@@ -613,8 +691,10 @@ def extract_all_segments(
         frames, _offset, duration = timing[i]
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
         seg_filter = source_grades.get(src_name, "") if is_auto else resolved
-        seg_filter = ",".join(f for f in (seg_filter, lut_chain) if f)
-        punch, framing = looks[i]
+        seg_filter = ",".join(f for f in (match_filters.get(src_name, ""), seg_filter, lut_chain) if f)
+        if src_name in skip_grade:
+            seg_filter = ""
+        punch, framing, motion = looks[i]
 
         note = r.get("beat") or r.get("note") or ""
         if punch and not r.get("punch_in"):
@@ -625,12 +705,13 @@ def extract_all_segments(
             preview=preview, draft=draft, rate=out_rate, punch_in=punch,
             rotation=source_rotations.get(src_name),
             canvas=canvas, framing=framing,
-            frames=frames, include_audio=False,
+            frames=frames, include_audio=False, motion=motion,
         )
         seg_paths.append(out_path)
         if plans_out is not None:
             plans_out.append({"source": src_path, "filter": seg_filter, "punch_in": punch, "framing": framing,
-                              "rotation": source_rotations.get(src_name), "canvas": canvas})
+                              "rotation": source_rotations.get(src_name), "canvas": canvas, "motion": motion,
+                              "start": start})
 
     return seg_paths
 
@@ -639,6 +720,155 @@ XFADE_TRANSITIONS = {
     "dissolve": "fade", "dip_black": "fadeblack", "dip_white": "fadewhite",
     "whip": "smoothleft", "slide": "slideleft", "zoom": "zoomin", "wipe": "wipeleft",
 }
+
+
+LIGHT_COLOR = "#FFB46E"  # warm leak; a brand kit sets its own under transitions.light.color
+
+
+def is_broll(r: dict) -> bool:
+    """A cutaway: picture from one source over another source's sound."""
+    if "broll" in r:
+        return bool(r["broll"])
+    audio = r.get("audio_source")
+    return isinstance(audio, dict) and audio.get("source") not in (None, r.get("source"))
+
+
+def _brand_kit(edl: dict, edit_dir: Path) -> dict:
+    try:
+        from graphics import load_brand_kit
+        return load_brand_kit(edl, edit_dir) or {}
+    except Exception:
+        return {}
+
+
+def resolve_transitions(edl: dict, brand: dict | None = None) -> list[dict | None]:
+    """The transition leading into each range (None = hard cut).
+
+    A range's own ``transition`` wins (``false``/``"cut"`` forces a hard cut).
+    Otherwise ``edl["transitions"]["broll"]`` — or the brand kit's
+    ``transitions.broll`` — is applied wherever the picture switches between a
+    B-roll cutaway and the main footage, so a house style ("always a light
+    flash in and out of B-roll") is one setting, not a note on every range.
+    """
+    ranges = edl["ranges"]
+    rules = dict((brand or {}).get("transitions") or {})
+    rules.update(edl.get("transitions") or {})
+    broll_rule = rules.get("broll")
+    if isinstance(broll_rule, str):
+        broll_rule = {"type": broll_rule}
+    out: list[dict | None] = [None]
+    for i in range(1, len(ranges)):
+        own = ranges[i].get("transition")
+        if own is False or own == "cut":
+            out.append(None)
+        elif own:
+            out.append({"type": own} if isinstance(own, str) else dict(own))
+        elif broll_rule and is_broll(ranges[i - 1]) != is_broll(ranges[i]):
+            out.append(dict(broll_rule))
+        else:
+            out.append(None)
+    return out
+
+
+def light_curve(pre: int, post: int) -> list[float]:
+    """Flash strength per frame: eases up over ``pre`` frames, peaks on the
+    first frame of the incoming shot, then a soft after-glow that fades out.
+    Shape measured from commercial light-leak flashes (30 fps: 6 + 1 + 7)."""
+    ramp = [0.65 * ((k + 1) / pre) ** 1.6 for k in range(pre)]
+    glow = []
+    for j in range(post):
+        u = (j + 1) / (post + 1)
+        glow.append(0.14 * (1 - u) ** 3 + 0.28 * np.sin(np.pi * u) ** 2)
+    return ramp + [1.0] + glow
+
+
+def light_clip(base: Path, out: Path, cut_s: float, rate: str, duration_ms: float, color: str,
+               before_s: float, after_s: float) -> tuple[Path, float, float] | None:
+    """Screen a coloured light flash over the frames around one cut.
+
+    Works on the assembled picture itself — a hard cut with a light wash, no
+    handle media needed — and is overlaid back like every other transition.
+    """
+    fps = float(Fraction(rate))
+    total = max(5, int(round(duration_ms / 1000 * fps)))
+    pre = min(int(round(total * 0.43)), int(before_s * fps) - 1)
+    post = min(total - 1 - int(round(total * 0.43)), int(after_s * fps) - 1)
+    if pre < 2 or post < 2:
+        return None
+    w, h = probe_video_size(base)
+    start = (int(round(cut_s * fps)) - pre) / fps
+    n = pre + 1 + post
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{start:.6f}", "-i", str(base), "-frames:v", str(n),
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3).astype(np.float32)
+    if len(frames) < n:
+        return None
+    rgb = np.array([int(color.lstrip("#")[k:k + 2], 16) / 255 for k in (0, 2, 4)], np.float32)
+    # Vertical falloff: the leak is strongest toward the bottom, like the measured flashes.
+    falloff = (0.75 + 0.25 * np.linspace(0, 1, h, dtype=np.float32))[:, None, None]
+    curve = light_curve(pre, post)
+    for k, s in enumerate(curve):
+        tint = rgb + (1 - rgb) * 0.35 if k == pre else rgb  # the peak frame burns toward white
+        strength = np.clip(s * tint * falloff, 0, 1)
+        frames[k] = 255 - (255 - frames[k]) * (1 - strength)
+    proc = subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                           "-r", rate, "-i", "-", "-frames:v", str(n), "-c:v", "libx264", "-preset", "fast",
+                           "-crf", "16", "-pix_fmt", "yuv420p", str(out)],
+                          input=np.clip(frames, 0, 255).astype(np.uint8).tobytes(), capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode(errors="replace")[-400:])
+    return out, start, n / fps
+
+
+def _read_frames(base: Path, start: float, n: int) -> tuple[np.ndarray, int, int]:
+    w, h = probe_video_size(base)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{start:.6f}", "-i", str(base), "-frames:v", str(n),
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3).astype(np.float32), w, h
+
+
+def _write_frames(frames: np.ndarray, out: Path, rate: str) -> None:
+    n, h, w, _ = frames.shape
+    proc = subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                           "-r", rate, "-i", "-", "-frames:v", str(n), "-c:v", "libx264", "-preset", "fast",
+                           "-crf", "16", "-pix_fmt", "yuv420p", str(out)],
+                          input=np.clip(frames, 0, 255).astype(np.uint8).tobytes(), capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode(errors="replace")[-400:])
+
+
+def fade_clip(base: Path, out: Path, cut_s: float, rate: str, out_ms: float, in_ms: float, color: str,
+              before_s: float, after_s: float) -> tuple[Path, float, float] | None:
+    """Fade the incoming shot up from a colour (black by default), optionally
+    fading the outgoing shot down first. Picture only — the sound is untouched.
+    Built from the assembled frames, so it needs no handle media."""
+    fps = float(Fraction(rate))
+    pre = min(int(round(out_ms / 1000 * fps)), int(before_s * fps) - 1)
+    post = min(int(round(in_ms / 1000 * fps)), int(after_s * fps) - 1)
+    if post < 2 and pre < 2:
+        return None
+    pre, post = max(pre, 0), max(post, 0)
+    start = (int(round(cut_s * fps)) - pre) / fps
+    frames, _, _ = _read_frames(base, start, pre + post)
+    if len(frames) < pre + post:
+        return None
+    rgb = np.array([int(color.lstrip("#")[k:k + 2], 16) for k in (0, 2, 4)], np.float32)
+    smooth = lambda u: u * u * (3 - 2 * u)
+    for k in range(pre):  # outgoing: towards the colour
+        a = smooth((k + 1) / (pre + 1))
+        frames[k] = frames[k] * (1 - a) + rgb * a
+    for k in range(post):  # incoming: up from the colour
+        a = smooth(1 - k / post)
+        frames[pre + k] = frames[pre + k] * (1 - a) + rgb * a
+    _write_frames(frames, out, rate)
+    return out, start, (pre + post) / fps
+
+
+def probe_video_size(path: Path) -> tuple[int, int]:
+    text = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                           "-of", "json", str(path)], capture_output=True, text=True, check=True).stdout
+    stream = json.loads(text)["streams"][0]
+    return int(stream["width"]), int(stream["height"])
 
 
 def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[dict], rate: str,
@@ -651,7 +881,9 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
     so the timeline length — and the separately built audio — never moves.
     """
     ranges = edl["ranges"]
-    items = [(i, r["transition"]) for i, r in enumerate(ranges) if i > 0 and r.get("transition")]
+    brand = _brand_kit(edl, edit_dir)
+    planned = resolve_transitions(edl, brand)
+    items = [(i, spec) for i, spec in enumerate(planned) if spec]
     if not items:
         return base_path
     fps = float(Fraction(rate))
@@ -661,9 +893,23 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
     clips: list[tuple[Path, float, float]] = []
     print(f"transitions: {len(items)}")
     for i, spec in items:
-        if isinstance(spec, str):
-            spec = {"type": spec}
         kind = spec.get("type", "dissolve")
+        if kind == "fade":
+            made = fade_clip(base_path, tdir / f"t{i:02d}_fade.mp4", timing[i][1], rate,
+                             float(spec.get("out_ms", 0)), float(spec.get("in_ms", spec.get("duration_ms", 500))),
+                             spec.get("color", "#000000"), timing[i - 1][2], timing[i][2])
+            if made:
+                clips.append(made)
+                print(f"  [{i:02d}] fade {made[2] * 1000:.0f}ms @ {timing[i][1]:.2f}s")
+            continue
+        if kind == "light":
+            color = spec.get("color") or ((brand.get("transitions") or {}).get("light") or {}).get("color") or LIGHT_COLOR
+            made = light_clip(base_path, tdir / f"t{i:02d}_light.mp4", timing[i][1], rate,
+                              float(spec.get("duration_ms", 470)), color, timing[i - 1][2], timing[i][2])
+            if made:
+                clips.append(made)
+                print(f"  [{i:02d}] light {made[2] * 1000:.0f}ms @ {timing[i][1]:.2f}s  ({color})")
+            continue
         a, b = ranges[i - 1], ranges[i]
         a_plan, b_plan = plans[i - 1], plans[i]
         a_end, b_start = float(a["end"]), float(b["start"])
@@ -679,9 +925,10 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
         parts = []
         for side, (rng_start, plan) in (("a", (a_end - hd, a_plan)), ("b", (b_start - hd, b_plan))):
             part = tdir / f"t{i:02d}_{side}.mp4"
+            motion = dict(plan["motion"], t_offset=rng_start - plan["start"]) if plan.get("motion") else None
             extract_segment(plan["source"], rng_start, n / fps, plan["filter"], part, preview=preview, draft=draft,
                             rate=rate, punch_in=plan["punch_in"], rotation=plan["rotation"], canvas=plan["canvas"],
-                            framing=plan["framing"], frames=n, include_audio=False)
+                            framing=plan["framing"], frames=n, include_audio=False, motion=motion)
             parts.append(part)
         clip = tdir / f"t{i:02d}_{kind}.mp4"
         subprocess.run([
@@ -695,17 +942,34 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
     if not clips:
         return base_path
     out = base_path.with_name(base_path.stem + "_fx.mp4")
-    inputs = ["-i", str(base_path)]
-    graph, current = [], "[0:v]"
-    for k, (clip, start, dur) in enumerate(clips, start=1):
-        inputs += ["-i", str(clip)]
-        graph.append(f"[{k}:v]setpts=PTS-STARTPTS+{start:.6f}/TB[t{k}]")
-        graph.append(f"{current}[t{k}]overlay=eof_action=pass:enable='between(t,{start:.6f},{start + dur - 0.5 / fps:.6f})'[v{k}]")
-        current = f"[v{k}]"
+    # Splice by frame number: stream the base's raw frames and swap in each
+    # clip's frames. (overlay's frame sync silently dropped late clips, and a
+    # trim+concat graph reading one input many times deadlocks ffmpeg.)
+    w, h = probe_video_size(base_path)
+    size = w * h * 3 // 2
+    swap: dict[int, bytes] = {}
+    for clip, start, dur in clips:
+        first = int(round(start * fps))
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(clip), "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                              "-s", f"{w}x{h}", "-"], capture_output=True, check=True).stdout
+        for k in range(min(int(round(dur * fps)), len(raw) // size)):
+            swap[first + k] = raw[k * size:(k + 1) * size]
     preset, crf = ("ultrafast", "28") if draft else (("fast", "20") if preview else ("medium", "16"))
-    subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(graph), "-map", current,
-                    "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p", "-r", rate,
-                    "-an", str(out)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    reader = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(base_path), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
+                              stdout=subprocess.PIPE)
+    writer = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}",
+                               "-r", rate, "-i", "-", "-c:v", "libx264", "-preset", preset, "-crf", crf,
+                               "-pix_fmt", "yuv420p", "-an", str(out)], stdin=subprocess.PIPE)
+    index = 0
+    while True:
+        frame = reader.stdout.read(size)
+        if len(frame) < size:
+            break
+        writer.stdin.write(swap.get(index, frame))
+        index += 1
+    writer.stdin.close()
+    if reader.wait() != 0 or writer.wait() != 0:
+        raise RuntimeError("transition splice failed")
     return out
 
 
@@ -782,17 +1046,19 @@ def build_audio_track(
     durations: dict[str, float | None] = {}
     placements: list[tuple[Path, float]] = []
     shifts = boundary_audio_shifts(ranges)
-    for i, r in enumerate(ranges):
-        src_name = r["source"]
+    runs = audio_runs(ranges)
+    for k, (first, last) in enumerate(runs):
+        src_name, run_start = audio_ref(ranges[first])
         src = resolve_path(sources[src_name], edit_dir)
         if src_name not in durations:
             durations[src_name] = probe_media_duration(src)
         src_dur = durations[src_name]
-        _frames, offset, duration = timing[i]
-        # J/L cuts move this range's audio boundaries (never the picture).
-        shift_in, shift_out = shifts[i], shifts[i + 1]
-        shift_in = max(shift_in, -float(r["start"]))
-        start = float(r["start"]) + shift_in
+        offset = timing[first][1]
+        duration = sum(timing[j][2] for j in range(first, last + 1))
+        # J/L cuts move the run's outer audio boundaries (never the picture).
+        shift_in, shift_out = shifts[first], shifts[last + 1]
+        shift_in = max(shift_in, -run_start)
+        start = run_start + shift_in
         offset = offset + shift_in
         duration = duration - shift_in + shift_out
         if src_dur is not None:
@@ -800,17 +1066,18 @@ def build_audio_track(
         end = start + duration
 
         # Handles only where a neighbour exists to crossfade with.
-        lead = min(half, start) if i > 0 else 0.0
-        tail = half if i < len(ranges) - 1 else 0.0
+        has_prev, has_next = k > 0, k < len(runs) - 1
+        lead = min(half, start) if has_prev else 0.0
+        tail = half if has_next else 0.0
         if src_dur is not None:
             tail = max(0.0, min(tail, src_dur - end))
-        fade_in = lead + half if i > 0 else 0.005
-        fade_out = tail + half if i < len(ranges) - 1 else 0.005
+        fade_in = lead + half if has_prev else 0.005
+        fade_out = tail + half if has_next else 0.005
         length = lead + duration + tail
         fade_in = min(fade_in, length / 2)
         fade_out = min(fade_out, length / 2)
 
-        part = parts_dir / f"a_{i:03d}.wav"
+        part = parts_dir / f"a_{k:03d}.wav"
         cmd = [
             "ffmpeg", "-y", "-v", "error",
             "-ss", f"{start - lead:.6f}", "-t", f"{length:.6f}",
@@ -818,6 +1085,7 @@ def build_audio_track(
             "-map", "0:a:0", "-vn",
             "-af", (
                 f"aresample={AUDIO_RATE},apad,atrim=0:{length:.6f},"
+                f"volume={float(ranges[first].get('audio_gain_db', 0)):.2f}dB,"
                 f"afade=t=in:st=0:d={fade_in:.6f}:curve=qsin,"
                 f"afade=t=out:st={length - fade_out:.6f}:d={fade_out:.6f}:curve=qsin"
             ),
@@ -830,8 +1098,37 @@ def build_audio_track(
     # Mix in batches so huge EDLs never hit filter-graph input limits.
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     _mix_placements(placements, total, out_wav)
-    print(f"audio → {out_wav.name}  ({len(placements)} segment(s), {crossfade_ms:.0f}ms equal-power crossfades)")
+    print(f"audio → {out_wav.name}  ({len(placements)} part(s) from {len(ranges)} range(s), {crossfade_ms:.0f}ms equal-power crossfades)")
     return out_wav
+
+
+def audio_ref(r: dict) -> tuple[str, float]:
+    """(audio source, audio start) of a range: its own, or ``audio_source``
+    (multicam: the picture comes from an angle, the sound from the master)."""
+    ref = r.get("audio_source")
+    if isinstance(ref, dict) and ref.get("source"):
+        return str(ref["source"]), float(ref.get("start", r["start"]))
+    return str(r["source"]), float(r["start"])
+
+
+def audio_runs(ranges: list[dict], tolerance: float = 0.002) -> list[tuple[int, int]]:
+    """Group ranges whose sound is continuous in one source into one audio part.
+
+    Crossfading a signal with its own continuation adds ~3 dB at the seam, so a
+    picture-only cut (multicam switch, punch-in on unbroken speech) keeps the
+    sound untouched.
+    """
+    runs: list[tuple[int, int]] = []
+    for i, r in enumerate(ranges):
+        if runs and i > 0 and not r.get("j_cut_ms") and not r.get("l_cut_ms"):
+            prev_src, prev_start = audio_ref(ranges[i - 1])
+            prev_end = prev_start + float(ranges[i - 1]["end"]) - float(ranges[i - 1]["start"])
+            src, start = audio_ref(r)
+            if src == prev_src and abs(start - prev_end) <= tolerance:
+                runs[-1] = (runs[-1][0], i)
+                continue
+        runs.append((i, i))
+    return runs
 
 
 def boundary_audio_shifts(ranges: list[dict]) -> list[float]:
@@ -1025,7 +1322,8 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
         seg_end = float(r["end"])
         seg_duration = seg_end - seg_start
 
-        tr_path = transcripts_dir / f"{src_name}.json"
+        from transcripts import transcript_path
+        tr_path = transcript_path(edit_dir, edl, src_name)
         if not tr_path.exists():
             print(f"  no transcript for {src_name}, skipping captions for this segment")
             seg_offset += seg_duration
@@ -1068,7 +1366,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
 # Social-media standard: -14 LUFS integrated, -1 dBTP peak, LRA 11 LU.
 # Matches YouTube / Instagram / TikTok / X / LinkedIn normalization targets.
 LOUDNORM_I = -14.0
-LOUDNORM_TP = -1.0
+LOUDNORM_TP = -1.5  # AAC adds ~0.5 dB of inter-sample overs; land under -1 after the encode
 LOUDNORM_LRA = 11.0
 
 
@@ -1382,6 +1680,12 @@ def main() -> None:
     total_s = timing[-1][1] + timing[-1][2] if timing else 0.0
     from audio_mix import build_mix
     from graphics import output_time
+    from sfx_library import auto_sfx
+    extra = auto_sfx(edl, edit_dir, rate, _brand_kit(edl, edit_dir), resolve_at=lambda at: output_time(edl, at, rate))
+    if extra:
+        print(f"auto sfx: {len(extra)} sound(s) for effects with none — "
+              + ", ".join(sorted({f"{e['auto']}" for e in extra})))
+        edl = dict(edl, audio=dict(edl.get("audio") or {}, sfx=list((edl.get("audio") or {}).get("sfx") or []) + extra))
     audio_path = build_mix(edl, edit_dir, audio_path, total_s, at_resolver=lambda at: output_time(edl, at, rate))
     audio_filter = None
     if not args.no_loudnorm:
@@ -1393,10 +1697,19 @@ def main() -> None:
     behind_subject_overlays = list(edl.get("behind_subject_overlays") or [])
     mask_config = edl.get("subject_mask")
     graphic_boxes: list[dict] = []
+    faces: list[dict] = []
+    if edl.get("graphics") or edl.get("captions"):
+        # Rule: no text on anyone's face. Faces are found on the assembled picture.
+        try:
+            from face_anchor import output_face_boxes
+            faces = output_face_boxes(base_path, canvas, edit_dir / "faces")
+            print(f"face keep-out: {len(faces)} box(es) on the output")
+        except (RuntimeError, OSError, subprocess.CalledProcessError, ValueError) as exc:
+            print(f"warning: face keep-out unavailable ({exc}); check text placement by eye")
     if edl.get("graphics"):
         from graphics import build_graphics
         print("graphics (brand kit tokens)")
-        graphic_top, graphic_behind = build_graphics(edl, edit_dir, canvas, rate)
+        graphic_top, graphic_behind = build_graphics(edl, edit_dir, canvas, rate, faces)
         overlays += graphic_top
         behind_subject_overlays += graphic_behind
         graphic_boxes = graphic_top + graphic_behind
@@ -1414,9 +1727,10 @@ def main() -> None:
         elif edl.get("captions"):
             from build_captions import build_caption_track, needs_coretext_track, write_styled_captions
             # The ASS is always written: QC reads caption timing from it.
-            ass_path = write_styled_captions(edl, edit_dir, canvas, graphic_boxes, edit_dir / "captions.ass")
+            keep_out = graphic_boxes + faces
+            ass_path = write_styled_captions(edl, edit_dir, canvas, keep_out, edit_dir / "captions.ass")
             if needs_coretext_track(edl, edit_dir):
-                overlays.append(build_caption_track(edl, edit_dir, canvas, graphic_boxes, rate, total_s,
+                overlays.append(build_caption_track(edl, edit_dir, canvas, keep_out, rate, total_s,
                                                     edit_dir / "captions_track" / "captions.mov"))
             else:
                 subs_path = ass_path

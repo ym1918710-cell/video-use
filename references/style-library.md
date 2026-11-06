@@ -120,3 +120,29 @@ When the user shares finished videos as "the level I want":
 4. Write any new, generally useful craft insight into this library as a recipe or
    adaptation, with no client names, colours, or logos. Write client identity only to
    the project or client brand identity file.
+
+
+## Transition vocabulary: when to suggest which
+
+| Transition | Reads as | Suggest when | Avoid when |
+|---|---|---|---|
+| Hard cut | Invisible, honest | The default, especially for dialogue and jump cuts | — |
+| `light` (coloured flash) | Energy, a brand "beat", a switch to illustration | Cutaways and B-roll in promo or testimonial reels, and section changes in kinetic styles. Use the brand colour (measured from references) or a warm leak. | Calm authority or documentary styles, or more than about 1 per 3 s |
+| `dissolve` | Time passing, softness | Story and montage styles, slow music | Fast talking heads, where it reads as a mistake |
+| `dip_black` / `dip_white` | Chapter break | Start or end of a section, before an end card | Mid-sentence |
+| `whip` / `slide` / `zoom` | Kinetic, playful | Native short-form and kinetic promo, on a beat | Serious or medical claims |
+
+Always land the cutaway on the word it shows. A house rule ("light in and out of every B-roll") belongs in the client's brand kit `transitions`, never in the tool.
+
+
+## Text vocabulary: composition × entrance per style
+
+| Style recipe | Questions / hooks | Names / labels | Proof / numbers | CTA |
+|---|---|---|---|---|
+| Kinetic promo | `two_tone` + `drop` | sticker `pop` | number `stamp` | `boxed` + `stamp` |
+| Static Q&A / testimonial | `stacked` or `two_tone` + `rise` | sticker `pop` | `highlight` the key word | `kicker` + `rise` |
+| Clean authority | `underline` + `wipe` | lower third `slide` | `blur` | `boxed` + `fade` |
+| Native short-form | `boxed` + `pop` | sticker `pop` | `typewriter` | `stamp` |
+| Story / documentary | `stacked` + `fade` / `blur` | lower third `fade` | `zoom` | `fade` |
+
+Keep one pairing per kind of beat inside a video. Every entrance makes a sound (auto SFX), so fewer, better-placed graphics beat many.

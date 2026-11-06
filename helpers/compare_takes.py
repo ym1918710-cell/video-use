@@ -83,7 +83,7 @@ def score(take: dict[str, Any], longest: int) -> float:
 
 def compare(edit_dir: Path) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for path in sorted((edit_dir / "transcripts").glob("*.json")):
+    for path in sorted(p for p in (edit_dir / "transcripts").glob("*.json") if not p.name.startswith("._")):
         items += phrases(json.loads(path.read_text(encoding="utf-8")), path.stem)
     report = []
     for group in group_takes(items):

@@ -303,6 +303,47 @@ def auto_grade_for_ranges(
     return filter_string, agg
 
 
+def rgb_percentiles(video: Path, spans: list[tuple[float, float]], per_span: int = 4) -> dict[str, list[float]]:
+    """Per-channel 5th/50th/95th percentiles over frames sampled from the spans."""
+    import numpy as np
+    pixels = []
+    for start, duration in spans:
+        for k in range(per_span):
+            t = start + duration * (k + 0.5) / per_span
+            out = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(video), "-frames:v", "1",
+                                  "-vf", "scale=96:-2", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                                 capture_output=True)
+            if out.stdout:
+                pixels.append(np.frombuffer(out.stdout, np.uint8).reshape(-1, 3))
+    if not pixels:
+        raise RuntimeError(f"could not sample frames from {video}")
+    data = np.concatenate(pixels).astype(np.float32)
+    return {ch: [float(np.percentile(data[:, i], q)) for q in (5, 50, 95)] for i, ch in enumerate("rgb")}
+
+
+def match_filter(source_stats: dict[str, list[float]], reference_stats: dict[str, list[float]],
+                 max_gain: float = 1.33) -> str:
+    """Per-channel levels + gamma transfer: black point (5th), white point
+    (95th) and midtone (median) of one camera onto a reference camera, so
+    black level, contrast, and white balance (the cast lives in the
+    midtones) all match."""
+    import math
+    parts = []
+    for ch in "rgb":
+        s5, s50, s95 = source_stats[ch]
+        r5, r50, r95 = reference_stats[ch]
+        s_span = max(1.0, s95 - s5)
+        gain = min(max_gain, max(1 / max_gain, (r95 - r5) / s_span))
+        r_span = gain * s_span
+        # A clamped gain cannot reach both reference points: centre it instead.
+        r_low = r5 if gain == (r95 - r5) / s_span else (r5 + r95) / 2 - r_span / 2
+        s_mid = min(0.98, max(0.02, (s50 - s5) / s_span))
+        r_mid = min(0.98, max(0.02, (r50 - r_low) / max(1.0, r_span)))
+        gamma = min(1.6, max(0.6, math.log(r_mid) / math.log(s_mid)))
+        parts.append(f"{ch}='clip({r_low:.2f}+{r_span:.2f}*pow(clip((val-({s5:.2f}))/{s_span:.2f},0,1),{gamma:.4f}),0,255)'")
+    return "lutrgb=" + ":".join(parts)
+
+
 def apply_grade(input_path: Path, output_path: Path, filter_string: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not filter_string:

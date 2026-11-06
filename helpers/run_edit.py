@@ -26,9 +26,15 @@ def main() -> None:
     parser.add_argument("--visual-qc", action="store_true", help="Generate cut-boundary filmstrips for agent review")
     parser.add_argument("--deliverables", action="store_true",
                         help="Also render every EDL `deliverables` version (other canvases / framings)")
+    parser.add_argument("--first-cut", action="store_true",
+                        help="Approval stage: cuts, framing, B-roll, transitions and dialogue only — "
+                             "no graphics, captions, overlays, music or SFX")
     args = parser.parse_args()
 
     edl = args.edl.resolve()
+    if args.first_cut:
+        edl = write_first_cut_edl(edl)
+        print(f"first cut → {edl.name} (finishing layers removed)")
     initialize(edl.parent)
     plan_path = edl.parent / "editorial_plan.json"
     if plan_path.exists():
@@ -74,6 +80,26 @@ def main() -> None:
             subprocess.run(command, check=True)
             subprocess.run([sys.executable, str(helper_dir / "verify_render.py"), str(variant_path), str(output),
                             "--report", str(variant_path.with_name(f"qc_report_{variant_path.stem}.json"))], check=True)
+
+
+FINISHING_KEYS = ("graphics", "captions", "subtitles", "overlays", "behind_subject_overlays", "subject_mask", "deliverables")
+
+
+def write_first_cut_edl(edl_path: Path) -> Path:
+    """The cut for approval: the story and pictures, nothing that hides them."""
+    edl = json.loads(edl_path.read_text(encoding="utf-8"))
+    cut = {k: v for k, v in edl.items() if k not in FINISHING_KEYS}
+    audio = dict(cut.get("audio") or {})
+    audio.pop("music", None)
+    audio.pop("sfx", None)
+    audio["auto_sfx"] = "first_cut"  # picture and dialogue only; sound comes with finishing
+    if audio:
+        cut["audio"] = audio
+    else:
+        cut.pop("audio", None)
+    path = edl_path.with_name(f"{edl_path.stem}_first_cut.json")
+    path.write_text(json.dumps(cut, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def write_deliverable_edls(edl_path: Path, output: Path) -> list[tuple[Path, Path]]:

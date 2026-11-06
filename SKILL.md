@@ -101,6 +101,10 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
 - **`face_anchor.py`** — local Vision face centres per range (face framing, auto punch-in).
 - **`export_timeline.py <edl.json>`** — CMX3600 + FCP7 XML hand-off for Premiere / Resolve / Avid.
 - **`compare_takes.py --edit-dir <dir>`** — ranks repeated lines across takes.
+- **`camera.py`** — keyframed zoom / pan / face-track maths (`zoom`, `camera`, `track` on a range); called by `render.py`.
+- **`multicam.py sync|switch <edl.json>`** — angle sync by audio; cuts to the speaker's angle.
+- **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.
+- **`text_render.py`** — Pillow + libraqm text engine (Linux twin of CoreText); `VIDEO_USE_TEXT_ENGINE=pil` forces it.
 - **`analyze_references.py <files|dir> -o reference_analysis.json`** — measures finished reference videos (format, shot length, loudness, silence, dominant colours) so a style or brand kit can be learned from examples.
 - **`person_mask.py <video> -o <mask.mkv>`** — uses local macOS Vision to create a frame-accurate person matte. No footage is uploaded.
 
@@ -113,7 +117,10 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 3. **Converse.** Describe what you see in plain English. Ask questions *shaped by the material*. Collect: content type, target length/aspect, aesthetic/brand direction, pacing feel, must-preserve moments, must-cut moments, animation and grade preferences, subtitle needs. Do not use a fixed checklist — the right questions are different every time.
 4. **Propose strategy.** Shortlist 2–3 style recipes from the style library's signals and recommend one, giving a reason tied to this material. Name the brand identity it will wear (or say it is brand-neutral). Then give 4–8 sentences: shape, take choices, cut direction, animation plan, grade direction, subtitle style, length estimate. **Wait for confirmation.** Record the chosen recipe in `style_profile.json` → `style`.
 5. **Execute.** Update `edit_brief.json` and `style_profile.json` with approved choices, then produce `edl.json` via the editor sub-agent brief. Drill into `timeline_view` at ambiguous moments. Build animations in parallel sub-agents. Apply grade per-segment. Use `validate_edl.py` to repair factual EDL errors before rendering.
-6. **Preview.** Run `run_edit.py edl.json -o preview.mp4 --preview --visual-qc`; this is the required render path.
+6. **First cut → approval → finish.**
+   1. Render `run_edit.py edl.json -o first_cut.mp4 --preview --first-cut`. This is the story, cuts, framing, B-roll, transitions, and dialogue only, with no graphics, captions, music, or SFX.
+   2. Self-check it, then show it and **wait for the user to approve the cut**.
+   3. Only then add the finishing layers and run `run_edit.py edl.json -o preview.mp4 --preview --visual-qc`. This is the required render path.
 7. **Self-eval (before showing the user).** Run `timeline_view` on the **rendered output** (not the sources) at every cut boundary (±1.5s window). Check each image for:
    - Visual discontinuity / flash / jump at the cut
    - Waveform spike or dip at the boundary (pop or gating the crossfade did not hide)
@@ -152,6 +159,7 @@ For every non-trivial decision, record the viewer-facing reason in the EDL or `e
 - **Punch-in:** Use only to emphasize a turn in meaning, a key proof, or a strong reaction. Add `"punch_in": {"scale": 1.08, "reason": "..."}` to a selected range. The renderer supports a restrained 1.03–1.20× punch-in cropped from the source pixels; add `anchor_x` / `anchor_y` (0–1) to keep the face, not the frame centre, in the crop. Inspect the source first for headroom and on-screen graphics. On a jump cut inside one take, alternating framing (e.g. 1.0 → 1.1) makes the cut read as intentional. Return to normal framing at the next editorial beat.
 - **Hero moments:** Flag demonstrations, emotional reactions, jokes, and key evidence as protected. Do not use silence removal or jump cuts that damage them; use a hold, a reaction, a J/L cut, or B-roll cover instead.
 - **B-roll / SFX:** Write proposed items to `editorial_plan.json` with `start_in_output`, `duration`, `purpose`, `source_or_query`, and `status: "proposed"`. Only turn an item into an overlay after the user provides or approves a licensed asset. Never silently fetch stock footage or use sound effects to disguise a weak cut.
+- **Never put text on a face.** `render.py` detects faces on the assembled picture and moves every graphic and caption to the nearest face-free spot. Still check the QC strips, especially on crowd B-roll where faces fill the frame.
 - **Decision limit:** Prefer one clear visual idea per beat. If an effect does not clarify, pace, or emotionally support the story, leave it out.
 
 ## The packed transcript (primary reading view)
@@ -290,7 +298,35 @@ For stickers, kinetic numbers, headlines, lower thirds, a logo bug, and end card
 - **Types:** `sticker`, `title_card`, `number` (+`label`), `headline` (`\n` for two lines), `lower_third` (`title`, `subtitle`), `logo` (from the kit, or `file`), and `end_card` (full frame, with the kit's logo + `text`).
 - **Timing:** use `start_in_output`, or `at: {source, time}` to land on a spoken word from the transcript. The renderer maps it through the kept ranges, so it stays correct after re-cuts.
 - **Position:** `top`, `top_center`, `upper_third`, `center`, `lower_third`, `bottom`, or `{x, y}` (the element's centre, 0–1). Positions are clamped to the safe area, and vertical canvases keep clear of the platform UI at the bottom.
-- **Motion:** `animation` is one of `pop`, `rise`, `slide`, `fade`, `none`. Defaults depend on the type, and timing follows the kit's `motion.energy` (`calm` / `medium` / `high`). Optional `tilt` (degrees) and `scale`.
+- **Motion:** `animation` is one of these. Defaults depend on the type, and timing follows the kit's `motion.energy` (`calm` / `medium` / `high`). Optional `tilt` (degrees) and `scale`.
+  - `pop`: overshoot scale. Light and friendly; the default for stickers.
+  - `rise`: drift up. Calm; the default for headlines.
+  - `slide`: from the reading side.
+  - `fade`: soft.
+  - `drop`: falls in with a bounce. Playful.
+  - `stamp`: lands from 1.6× with impact. For a hero word or a number.
+  - `zoom`: gentle scale-up. Premium or calm.
+  - `wipe`: reveals in reading direction (RTL from the right).
+  - `blur`: focuses in. Cinematic or authority.
+  - `typewriter`: one word at a time, with a tick each.
+  - `none`.
+- **Composition:** set `style` on headlines and cards.
+  - `stacked`: the default.
+  - `two_tone`: the last line in the accent colour, 12% bigger. Good for a question with a payoff.
+  - `boxed`: text on a brand-colour block. Reads on busy footage.
+  - `kicker`: a small pill (`kicker` text) above the headline, then the headline.
+  - `underline`: an accent bar under the text.
+  - `highlight: ["word"]` colours chosen words in the accent colour, in any style. The accent comes from `shapes.headline.accent`, else `colors.accent`.
+  - Layered styles animate part by part (kicker → text → bar), not as one block.
+  - Vary styles across a video: a different composition or entrance for each kind of beat (question, proof, name, CTA), kept consistent within a kind.
+- **Drop shadow:** every text card and pill gets a soft drop shadow cast from its own shape, so it reads on any picture. Tune it with the kit's `text_shadow` (`color`, `opacity`, `blur_ratio`, `offset_ratio`), turn it off for the brand with `"text_shadow": false`, or per element with `"shadow": false`.
+- **Collisions:** an element moved off a face also avoids every graphic already on screen, so moved elements never stack on each other.
+- **Sound for every effect:** every graphic entrance, transition, and camera move gets a matching sound automatically.
+  - The sounds are `pop`, `impact`, `whoosh`, `swoosh`, `soft`, `shimmer` (light flash), `tick` (per typewriter word), and `riser` (end card). They are synthesised into `<edit>/sfx/auto_*.wav`, so no licence is needed.
+  - Map any kind to a licensed file with `sfx_map`, in the brand kit or `edl.audio`.
+  - A hand-placed SFX within 0.15 s of an effect counts as its sound.
+  - Opt out with `"sfx": false` on an element, or `audio.auto_sfx: false` for the edit. QC then lists every effect left silent, in `effect_sound`.
+  - The first cut has no SFX.
 - **Behind the subject:** `"behind_subject": true` puts the element behind the person. The person mask is created automatically. Check that the face stays clear.
 - **Rendering:** text goes through macOS CoreText, so Arabic, mixed Arabic/Latin, and any installed or brand-supplied font (`.ttf`/`.otf` path in the kit) shape correctly. Pick an Arabic font that has bold weights. Elements are cached in `<edit>/graphics/`.
 - The style recipe decides **how many** graphics to use and where (see the style library). Give each one a job: one idea per beat, and land it on the word it supports. Don't stack a sticker, number, and punch-in on the same beat.
@@ -404,11 +440,76 @@ The dialogue master (equal-power crossfades) can be finished like a mix engineer
   - `"l_cut_ms"` lets the previous sound run on under this range's picture (reactions, B-roll).
   - Neither changes the duration. The validator rejects both on the same cut.
 
+## Camera moves (smooth keyframed zoom in / out, pans, face tracking)
+
+Any range can carry a virtual camera move. It is rendered with per-frame cubic resampling from source pixels: subpixel-smooth, with no zoompan shake and no loss of 4K detail.
+
+```json
+{"source": "C0103", "start": 2.0, "end": 6.5, "zoom": {"from": 1.0, "to": 1.15, "ease": "smooth", "start": 0.5, "duration": 2.5}}
+{"source": "C0103", "start": 9.0, "end": 14.0, "camera": [
+  {"t": 0, "scale": 1.0}, {"t": 0.9, "scale": 1.15, "ease": "out"},
+  {"t": 3.2, "scale": 1.15}, {"t": 4.6, "scale": 1.0, "ease": "in_out"}]}
+{"source": "WIDE", "start": 20.0, "end": 28.0, "track": "face"}
+```
+
+- **`zoom`** is a single push-in (`to > from`) or pull-out (`from > to`). `start` and `duration` are seconds within the range; leave them out to move over the whole range.
+- **`camera`** takes free keyframes. `t` is seconds from the range start, `scale` is 1.0–2.0, and the optional `x` / `y` set the window centre (0–1) for a pan. Each key's `ease` shapes the segment that ends at it.
+- **Eases:**
+  - `smooth` (default): no velocity or acceleration at either end. Reads as a camera operator.
+  - `in_out`: firmer in the middle.
+  - `out`: fast start, soft landing. Good for punches.
+  - `in`, `linear`.
+- **`track: "face"`** follows the face inside the shot. Detection runs every 0.2 s, and the path is low-passed with no lag. If the face barely moves the shot stays locked off, because a drifting camera reads as amateur. It combines with `zoom` / `camera` scale keys.
+- **Taste:**
+  - One move per beat.
+  - A slow push-in (1.0 → 1.08–1.15 over 2–4 s) builds tension or intimacy. A pull-out releases or reveals.
+  - Land a fast `out` punch on the word it emphasises.
+  - Don't move the camera on every range. Moves stand out against stillness.
+  - The window centre defaults to the face (with `anchor: "face"`) or to the range's anchors.
+
+## Colour match between cameras
+
+`"grade": {"base": "auto", "match": "A", "match_sources": ["B"], "skip": ["OUTRO"]}` matches the other cameras (or only `match_sources`) to source `A`; sources in `skip` (a client's finished outro, supplied B-roll) are left ungraded. It transfers per-channel levels and gamma (black point, white point, midtone, so the white balance matches too), and then applies one shared correction to all cameras. Use it when two angles, or an old and a new shoot, sit side by side. Check the skin tones in the QC strips.
+
+## Multicam (sync + cut to the speaker)
+
+1. Cut the story on the master source (the one with the diarized transcript) as usual.
+2. Add a `multicam` block:
+
+   ```json
+   "multicam": {"master": "M", "angles": {"A": {"speaker": "speaker_0"}, "B": {"speaker": "speaker_1"}, "W": {"wide": true}},
+                "min_shot_s": 1.5, "max_shot_s": 7.0, "switch_delay_s": 0.15}
+   ```
+
+3. Run `multicam.py sync edl.json`. It finds each angle's offset by audio cross-correlation, writes the offsets into the EDL, and prints a confidence; check low ones by eye.
+4. Run `multicam.py switch edl.json -o edl_multicam.json`. Every master range becomes shots on the speaker's angle:
+   - interjections shorter than `min_shot_s` don't get a cut;
+   - a monologue longer than `max_shot_s` gets a wide break.
+5. Each shot keeps the master's continuous sound (`audio_source`), so picture cuts never touch the dialogue.
+
+`audio_source: {"source": "M", "start": 12.3}` can be set by hand on any range too, for example a picture from one take over the sound of another. Ranges whose sound is continuous in one source become one audio part, with no crossfade bump.
+
+## Music & SFX library
+
+`library.py` keeps the user's own licensed music and SFX:
+
+- `scan <folder> --type music --license "<where it is licensed>"` measures tempo, energy, brightness, and loudness.
+- `tag <id> --mood uplifting,tech` adds mood tags.
+- `search` and `suggest --recipe kinetic_promo --duration 45` rank tracks for the chosen style recipe.
+
+Reference a track in the EDL as `"file": "library:<id>"`. Offer the user two contrasting suggestions to listen to, and make sure every delivered track has a licence on record.
+
 ## Transitions, framing, and look
 
 - **Transitions:** set `"transition": {"type": "dissolve", "duration_ms": 400}` on the range a transition leads *into*.
-  - Types: `dissolve`, `dip_black`, `dip_white`, `whip`, `slide`, `zoom`, `wipe`.
+  - Types: `dissolve`, `dip_black`, `dip_white`, `whip`, `slide`, `zoom`, `wipe`, `light`.
   - The clip is built from handles on both sides and laid centred over the cut, so the length and audio sync never change.
+  - `light` is a hard cut with a coloured light flash screened over it: it builds over ~6 frames, peaks on the first frame of the new shot, then leaves a soft after-glow (`duration_ms` default 470). It needs no handle media. The colour comes from `color`, else the brand kit's `transitions.light.color`, else a warm leak.
+  - `fade` brings the incoming shot up from black (or `color`) over `in_ms` (default 500), and can first take the outgoing shot down over `out_ms`. It is picture only, leaves the sound alone, and needs no handles. Use it for an end card or outro that should "appear".
+  - `"audio_gain_db": -3` on a range trims that range's sound before the mix. Use it to level-match a supplied asset, such as a client outro that is mastered louder than the dialogue.
+  - **House rule for B-roll:** `"transitions": {"broll": {"type": "light"}}` in the EDL, or in the brand kit, puts that transition on every switch between a B-roll cutaway (a range whose `audio_source` is another source, or `"broll": true`) and the main footage. A range's own `transition` wins, and `"transition": "cut"` forces a hard cut.
+  - `analyze_references.py` finds light flashes in reference videos by itself (`light_flashes` per file; `summary.light_transition` with count, colour, and a `brand_kit_suggestion`). When most of a client's references flash in and out of cutaways, copy that colour into the brand kit and set `transitions.broll`.
+  - Land B-roll **on the word it illustrates**: start the cutaway at that word's start time in the transcript, not at the end of the phrase.
   - The default is still a hard cut. Use a transition only for a real change of time, place, or section, never to hide a weak cut.
 - **Face anchor:** `source_framing.X.anchor: "face"` (or `punch_in.anchor: "face"`) centres every crop on the face. It uses local macOS Vision, takes a median per range, and caches results in `<edit>/faces/`. This is the right default for 16:9 → 9:16 / 4:5 reframes of talking heads.
 - **Auto punch:** `"auto_punch": {"scale": 1.1}` (or `true`) alternates framing on jump cuts (consecutive ranges of one take), anchored on the face. A hand-set `punch_in` always wins.

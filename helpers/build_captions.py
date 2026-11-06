@@ -8,6 +8,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from transcripts import transcript_path as find_transcript  # noqa: E402
+
 
 def ass_timestamp(seconds: float) -> str:
     centiseconds = max(0, round(seconds * 100))
@@ -44,15 +48,28 @@ BREAK_MARKS = (".", "!", "?", "؟", "…", "،", "؛", ",", ";", ":")
 
 
 def grouped_words(words: list[dict[str, Any]], max_words: int) -> list[list[dict[str, Any]]]:
+    """Chunk words into captions: never across a clause mark, and balanced —
+    a 4-word clause with max 3 reads 2 + 2, never 3 + an orphan flash."""
     output: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
+    clause: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if not clause:
+            return
+        parts = -(-len(clause) // max(1, max_words))
+        size, extra = divmod(len(clause), parts)
+        index = 0
+        for k in range(parts):
+            take = size + (1 if k < extra else 0)
+            output.append(clause[index:index + take])
+            index += take
+        clause.clear()
+
     for word in words:
-        current.append(word)
-        if len(current) >= max_words or str(word.get("text", "")).rstrip().endswith(BREAK_MARKS):
-            output.append(current)
-            current = []
-    if current:
-        output.append(current)
+        clause.append(word)
+        if str(word.get("text", "")).rstrip().endswith(BREAK_MARKS):
+            flush()
+    flush()
     return output
 
 
@@ -133,7 +150,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     for item in edl.get("ranges", []):
         source = item["source"]
         start, end = float(item["start"]), float(item["end"])
-        transcript_path = edit_dir / "transcripts" / f"{source}.json"
+        transcript_path = find_transcript(edit_dir, edl, source)
         if not transcript_path.exists():
             offset += end - start
             continue
@@ -183,7 +200,11 @@ CAPTION_DEFAULTS = {
     "box_opacity": 0.55,
     "text_color": "#FFFFFF",
     "outline_color": "#101010",
-    "highlight": None,     # "#HEX": colour the word being spoken
+    "highlight": None,     # "#HEX": colour the word being spoken (or every keyword)
+    "highlight_mode": "word",  # "word" = karaoke on the spoken word; "keywords" = colour `keywords` all cue long
+    "keywords": [],
+    "glow": None,          # "#HEX[AA]": soft coloured halo around the text
+    "strip_punctuation": False,  # True: no . , ، ؟ ! … on screen
     "max_words": 4,
     "font": None,
 }
@@ -217,20 +238,58 @@ def caption_skin(edl: dict[str, Any], edit_dir: Path) -> dict[str, Any]:
 
 
 def caption_cues(edl: dict[str, Any], edit_dir: Path, max_words: int) -> list[tuple[float, float, list[tuple[float, float, str]]]]:
-    """(start, end, [(word_start, word_end, text)]) on the output timeline, smoothed."""
+    """(start, end, [(word_start, word_end, text)]) on the output timeline, smoothed.
+
+    Words come from where the *sound* comes from (B-roll / multicam use
+    ``audio_source``); a range can opt out with ``"captions": false``. A word
+    belongs to the one range holding its midpoint (no repeats at a cut), and
+    captions run across picture cuts while the sound is continuous, so a
+    cutaway never chops a phrase into flashes.
+    """
     offset = 0.0
-    raw: list[tuple[float, float, list[tuple[float, float, str]]]] = []
+    runs: list[list[tuple[float, float, str, str]]] = []
+    previous: tuple[str, float] | None = None
+    transcripts: dict[str, dict] = {}
     for item in edl.get("ranges", []):
-        start, end = float(item["start"]), float(item["end"])
-        path = edit_dir / "transcripts" / f"{item['source']}.json"
-        if path.exists():
-            transcript = json.loads(path.read_text(encoding="utf-8"))
-            for group in grouped_words(words_in_range(transcript, start, end), max_words):
-                words = [(offset + max(start, float(w["start"])) - start, offset + min(end, float(w["end"])) - start,
-                          str(w["text"]).strip()) for w in group]
-                if words[-1][1] > words[0][0]:
-                    raw.append((words[0][0], words[-1][1], words))
+        sound = item.get("audio_source") if isinstance(item.get("audio_source"), dict) else None
+        source = sound["source"] if sound else item["source"]
+        start = float(sound.get("start", item["start"])) if sound else float(item["start"])
+        end = start + float(item["end"]) - float(item["start"])
+        if item.get("captions") is False:
+            offset += end - start
+            previous = None
+            continue
+        if source not in transcripts:
+            path = find_transcript(edit_dir, edl, source)
+            transcripts[source] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not (previous and previous[0] == source and abs(previous[1] - start) < 0.05 and runs):
+            runs.append([])
+        for w in words_in_range(transcripts[source], start, end):
+            mid = (float(w["start"]) + float(w["end"])) / 2
+            if not start <= mid < end:
+                continue
+            runs[-1].append((offset + max(start, float(w["start"])) - start, offset + min(end, float(w["end"])) - start,
+                             str(w["text"]).strip(), ""))
+        previous = (source, end)
         offset += end - start
+    raw: list[tuple[float, float, list[tuple[float, float, str]]]] = []
+    for run in runs:
+        items = [{"start": a, "end": b, "text": t} for a, b, t, _ in run]
+        groups = grouped_words(items, max_words)
+        # A flash under 0.5 s is unreadable: join it to its clause neighbour
+        # when the pair stays within one extra word.
+        merged: list[list[dict[str, Any]]] = []
+        for group in groups:
+            if merged and not str(merged[-1][-1]["text"]).rstrip().endswith(BREAK_MARKS) \
+                    and len(merged[-1]) + len(group) <= max_words + 1 \
+                    and min(merged[-1][-1]["end"] - merged[-1][0]["start"], group[-1]["end"] - group[0]["start"]) < 0.5:
+                merged[-1] = merged[-1] + group
+            else:
+                merged.append(group)
+        for group in merged:
+            words = [(float(w["start"]), float(w["end"]), w["text"]) for w in group]
+            if words[-1][1] > words[0][0]:
+                raw.append((words[0][0], words[-1][1], words))
     smoothed = smooth_events([(a, b, str(i)) for i, (a, b, _w) in enumerate(raw)])
     return [(a, b, raw[int(key)][2]) for a, b, key in smoothed]
 
@@ -249,21 +308,26 @@ def caption_margin(canvas: tuple[int, int], skin: dict, cue: tuple[float, float]
     block = round(size * 2.8)  # up to two lines plus padding
     centre = float(skin["position"]) * h
     top, bottom = centre - block / 2, centre + block / 2
-    for box in boxes:
-        t0, t1 = float(box["start_in_output"]), float(box["start_in_output"]) + float(box["duration"])
-        if not _overlaps(cue[0], cue[1], t0, t1):
-            continue
-        if box.get("type") == "end_card":
-            return None
-        gy0, gy1 = float(box["y"]), float(box["y"]) + float(box.get("h", 0))
-        if not _overlaps(top, bottom, gy0, gy1):
-            continue
+    active = [b for b in boxes if _overlaps(cue[0], cue[1], float(b["start_in_output"]),
+                                            float(b["start_in_output"]) + float(b["duration"]))]
+    if any(b.get("type") == "end_card" for b in active):
+        return None
+    bands = [(float(b["y"]), float(b["y"]) + float(b.get("h", 0))) for b in active]
+
+    def blocked(t: float) -> bool:
+        return any(_overlaps(t, t + block, y0, y1) for y0, y1 in bands)
+
+    # Nearest band to the preferred spot that clears every graphic and face.
+    if blocked(top):
         gap = round(h * 0.015)
-        below = gy1 + gap
-        if below + block <= h * 0.88:          # room under the graphic
-            top, bottom = below, below + block
-        else:                                  # otherwise sit above it
-            top, bottom = gy0 - gap - block, gy0 - gap
+        limit = h * 0.88 - block
+        options = sorted({max(0.0, y1 + gap) for _y0, y1 in bands} | {y0 - gap - block for y0, _y1 in bands},
+                         key=lambda t: abs(t - top))
+        for t in options:
+            if h * 0.04 <= t <= limit and not blocked(t):
+                top = t
+                break
+    bottom = top + block
     return max(0, round(h - bottom))
 
 
@@ -299,6 +363,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     highlight = skin.get("highlight")
     events: list[str] = []
     for start, end, words in caption_cues(edl, edit_dir, int(skin["max_words"])):
+        words = [(a, b, clean_word(t, skin)) for a, b, t in words]
         margin = caption_margin(canvas, skin, (start, end), boxes or [])
         if margin is None:
             continue
@@ -307,6 +372,11 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             events.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},Caption,,0,0,{margin},,{rtl_line(line)}")
             continue
         colour = ass_color(highlight)[4:]  # BBGGRR
+        if keyword_mode(skin):
+            line = " ".join(("{\\c&H" + colour + "&}" + ass_escape(t) + "{\\r}") if is_keyword(t, skin.get("keywords") or [])
+                            else ass_escape(t) for _a, _b, t in words)
+            events.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},Caption,,0,0,{margin},,{rtl_line(line)}")
+            continue
         for k, (w0, _w1, _t) in enumerate(words):
             k_start = start if k == 0 else w0
             k_end = words[k + 1][0] if k + 1 < len(words) else end
@@ -328,9 +398,11 @@ def write_styled_captions(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int
 
 def needs_coretext_track(edl: dict[str, Any], edit_dir: Path) -> bool:
     """Arabic + word highlight needs whole-line bidi; libass lays out per run."""
-    import sys as _sys
-    if _sys.platform != "darwin":
-        return False
+    from graphics import text_engine
+    if text_engine() == "pil":
+        from text_render import raqm_available
+        if not raqm_available():
+            return False
     skin = caption_skin(edl, edit_dir)
     if not skin.get("highlight"):
         return False
@@ -338,6 +410,25 @@ def needs_coretext_track(edl: dict[str, Any], edit_dir: Path) -> bool:
         if any("\u0590" <= ch <= "\u08ff" for _s, _e, t in words for ch in t):
             return True
     return False
+
+
+PUNCTUATION = ".,،؛:!?؟…\"'«»()[]{}-–—"
+
+
+def clean_word(text: str, skin: dict) -> str:
+    """Caption word as shown: punctuation dropped when the skin asks for it."""
+    if not skin.get("strip_punctuation"):
+        return text
+    return text.strip(PUNCTUATION).replace("…", "") or text
+
+
+def is_keyword(text: str, keywords: list[str]) -> bool:
+    bare = text.strip(" .,،؛:!?؟…\"'()[]").lower()
+    return any(bare == k.lower() or (len(k) > 3 and k.lower() in bare) for k in keywords)
+
+
+def keyword_mode(skin: dict) -> bool:
+    return skin.get("highlight_mode") == "keywords"
 
 
 def _utf16_len(text: str) -> int:
@@ -359,13 +450,15 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
     work.mkdir(parents=True, exist_ok=True)
     states: list[tuple[float, float, int, dict]] = []  # (start, end, margin, card)
     for start, end, words in caption_cues(edl, edit_dir, int(skin["max_words"])):
+        words = [(a, b, clean_word(t, skin)) for a, b, t in words]
         margin = caption_margin(canvas, skin, (start, end), boxes)
         if margin is None:
             continue
         texts = [t for _a, _b, t in words]
         line = " ".join(texts)
+        karaoke = skin.get("highlight") and not keyword_mode(skin)
         targets = [(start if k == 0 else words[k][0], words[k + 1][0] if k + 1 < len(words) else end, k)
-                   for k in range(len(words))] if skin.get("highlight") else [(start, end, None)]
+                   for k in range(len(words))] if karaoke else [(start, end, None)]
         for k_start, k_end, k in targets:
             if k_end <= k_start:
                 continue
@@ -373,6 +466,11 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
             if k is not None:
                 offset = sum(_utf16_len(t) + 1 for t in texts[:k])
                 spans = [{"start": offset, "length": _utf16_len(texts[k]), "color": skin["highlight"]}]
+            elif keyword_mode(skin) and skin.get("highlight"):
+                for j, t in enumerate(texts):
+                    if is_keyword(t, skin.get("keywords") or []):
+                        spans.append({"start": sum(_utf16_len(x) + 1 for x in texts[:j]), "length": _utf16_len(t),
+                                      "color": skin["highlight"]})
             card: dict[str, Any] = {
                 "lines": [{"text": line, "font": skin["font"], "size": size, "color": skin["text_color"],
                            "weight": "bold", "spans": spans}],
@@ -385,6 +483,8 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
             else:
                 card["textStroke"] = {"color": skin["outline_color"], "blur": -4, "dx": 0, "dy": 0}
                 card["shadow"] = {"color": "#00000080", "blur": round(size * 0.12), "dx": 0, "dy": round(size * 0.05)}
+                if skin.get("glow"):  # a soft coloured halo, e.g. a brand blue
+                    card["glow"] = {"color": skin["glow"], "blur": round(size * 0.35), "dx": 0, "dy": 0}
             key = hashlib.sha1(json.dumps(card, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
             card["file"] = str(work / f"cap_{key}.png")
             states.append((k_start, k_end, margin, card))

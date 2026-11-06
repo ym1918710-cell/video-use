@@ -133,6 +133,51 @@ def sample_pixels(path: Path, duration: float, samples: int = 8) -> np.ndarray:
     return np.concatenate(frames) if frames else np.zeros((0, 3), np.uint8)
 
 
+def find_light_flashes(frames: np.ndarray, fps: float) -> list[dict[str, Any]]:
+    """Light-leak / flash transitions in decoded RGB frames (N×H×W×3, uint8).
+
+    A flash is a one-frame brightness spike well above its neighbours, preceded
+    by a ramp of a coloured wash. Its colour is recovered by inverting a screen
+    blend on a ramp frame against a clean frame before it.
+    """
+    f = frames.astype(np.float32)
+    mean = f.mean(axis=(1, 2, 3))
+    events: list[dict[str, Any]] = []
+    last = -99
+    for i in range(10, len(mean) - 6):
+        around = np.r_[mean[max(0, i - 12):i - 4], mean[i + 4:i + 12]]
+        if mean[i] - np.median(around) <= 35 or mean[i] <= 150 or i - last < 8:
+            continue
+        ref = f[i - 9]
+        pre = 0
+        while pre < 8 and mean[i - 1 - pre] - mean[i - 9] > 3:
+            pre += 1
+        post = 0
+        while post < 10 and i + 1 + post < len(mean) and abs(mean[i + 1 + post] - mean[min(len(mean) - 1, i + 12)]) > 3:
+            post += 1
+        color = None
+        if pre >= 2:
+            ramp = f[i - 2]
+            screen = 1 - (255 - ramp) / np.maximum(255 - ref, 1)
+            c = np.clip(np.median(screen.reshape(-1, 3), axis=0), 0, 1)
+            if c.max() > 0.05:
+                c = c / c.max()
+                color = "#" + "".join(f"{int(round(v * 255)):02X}" for v in c)
+        events.append({"time_s": round(i / fps, 3), "pre_frames": pre, "post_frames": post,
+                       "duration_ms": round((pre + 1 + post) / fps * 1000), "color": color})
+        last = i
+    return events
+
+
+def light_flashes(path: Path, fps: float | None) -> list[dict[str, Any]]:
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", "scale=36:64", "-pix_fmt", "rgb24",
+                          "-f", "rawvideo", "-"], capture_output=True)
+    frames = np.frombuffer(out.stdout, np.uint8)
+    if not len(frames):
+        return []
+    return find_light_flashes(frames.reshape(-1, 64, 36, 3), fps or 30.0)
+
+
 def analyze(path: Path) -> dict[str, Any]:
     fmt = probe_format(path)
     duration = fmt["duration_s"] or 0.0
@@ -142,6 +187,7 @@ def analyze(path: Path) -> dict[str, Any]:
         report["loudness"] = loudness(path)
         report["silence"] = silence(path, duration)
     report["dominant_colors"] = dominant_colors(sample_pixels(path, duration)) if duration else []
+    report["light_flashes"] = light_flashes(path, fmt.get("fps")) if duration else []
     return report
 
 
@@ -149,7 +195,7 @@ def collect(inputs: list[Path]) -> list[Path]:
     files: list[Path] = []
     for item in inputs:
         if item.is_dir():
-            files.extend(sorted(p for p in item.rglob("*") if p.suffix.lower() in VIDEO_EXTS))
+            files.extend(sorted(p for p in item.rglob("*") if p.suffix.lower() in VIDEO_EXTS and not p.name.startswith("._")))
         elif item.suffix.lower() in VIDEO_EXTS:
             files.append(item)
     return files
@@ -170,12 +216,26 @@ def summarize(reports: list[dict[str, Any]]) -> dict[str, Any]:
     lufs = values(lambda r: r["loudness"]["integrated_lufs"])
     peaks = values(lambda r: r["loudness"]["true_peak_dbtp"])
     cpm = values(lambda r: r["pacing"]["cuts_per_minute"])
+    flashes = [e for r in reports for e in (r.get("light_flashes") or [])]
+    colors = [e["color"] for e in flashes if e.get("color")]
+    light = None
+    if flashes:
+        rgb = np.median([[int(c[k:k + 2], 16) for k in (1, 3, 5)] for c in colors], axis=0) if colors else None
+        light = {
+            "count": len(flashes),
+            "in_references": sum(bool(r.get("light_flashes")) for r in reports),
+            "duration_ms": int(np.median([e["duration_ms"] for e in flashes])),
+            "color": "#" + "".join(f"{int(v):02X}" for v in rgb) if rgb is not None else None,
+            "brand_kit_suggestion": {"transitions": {"light": {"color": None}}},
+        }
+        light["brand_kit_suggestion"]["transitions"]["light"]["color"] = light["color"]
     return {
         "count": len(reports),
         "sizes": sorted({f"{r['format']['width']}x{r['format']['height']}@{r['format']['fps']}" for r in reports}),
         "lufs_range": [min(lufs), max(lufs)] if lufs else None,
         "clipping_references": sum(p > -1.0 for p in peaks),
         "cuts_per_minute_range": [min(cpm), max(cpm)] if cpm else None,
+        "light_transition": light,
     }
 
 

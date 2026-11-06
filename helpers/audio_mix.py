@@ -45,12 +45,15 @@ REFERENCE_DIALOGUE_LUFS = -14.0
 
 
 def _resolve(value: str, base: Path) -> Path:
+    if value.startswith("library:"):
+        from library import resolve
+        return resolve(value)
     path = Path(value).expanduser()
     return path if path.is_absolute() else (base / path).resolve()
 
 
 def _run(cmd: list[str]) -> None:
-    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[-600:]}")
 
@@ -62,7 +65,7 @@ def measure_lufs(path: Path, start: float = 0.0, duration: float | None = None) 
     if duration:
         cmd += ["-t", f"{duration:.3f}"]
     cmd += ["-i", str(path), "-vn", "-af", "loudnorm=print_format=json", "-f", "null", "-"]
-    stderr = subprocess.run(cmd, capture_output=True, text=True).stderr
+    stderr = subprocess.run(cmd, capture_output=True, text=True, errors="replace").stderr
     match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.S)
     if not match:
         return None
@@ -175,8 +178,10 @@ def render_music_cue(cue: dict, total: float, regions: list[tuple[float, float]]
     delay = int(round(start * AUDIO_RATE))
     graph = (
         f"[0:a]aresample={AUDIO_RATE},aformat=sample_fmts=flt:channel_layouts=stereo,"
-        f"atrim=0:{duration:.6f},asetpts=N/SR/TB,"
-        f"afade=t=in:st=0:d={fade_in:.3f},afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}[m];"
+        f"atrim=0:{duration:.6f},asetpts=N/SR/TB"
+        + (f",afade=t=in:st=0:d={fade_in:.3f}" if fade_in > 0 else "")
+        + (f",afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}" if fade_out > 0 else "")
+        + "[m];"
         f"[1:a]aresample={AUDIO_RATE},pan=stereo|c0=c0|c1=c0,aformat=sample_fmts=flt,atrim=0:{duration:.6f}[e];"
         f"[m][e]amultiply,adelay=delays={delay}S:all=1,apad=whole_dur={total:.6f},atrim=0:{total:.6f}[out]"
     )
@@ -259,7 +264,11 @@ def validate_audio(edl: dict, base: Path, total: float) -> list[tuple[str, str, 
             if not isinstance(item, dict) or not isinstance(item.get("file"), str):
                 issues.append(("error", "invalid_audio_item", "Needs a file.", path))
                 continue
-            if not _resolve(item["file"], base).is_file():
+            try:
+                exists = _resolve(item["file"], base).is_file()
+            except FileNotFoundError:
+                exists = False
+            if not exists:
                 issues.append(("error", "audio_file_missing", f"{item['file']} not found.", f"{path}.file"))
             try:
                 start = float(item.get("start_in_output", 0) or 0)

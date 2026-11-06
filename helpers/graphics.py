@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,10 +28,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 GRAPHIC_TYPES = {"sticker", "title_card", "number", "headline", "lower_third", "logo", "end_card"}
-ANIMATIONS = {"pop", "rise", "slide", "fade", "none"}
+ANIMATIONS = {"pop", "rise", "slide", "fade", "drop", "stamp", "zoom", "wipe", "blur", "typewriter", "none"}
+STYLES = {"stacked", "two_tone", "boxed", "kicker", "underline"}
 NAMED_POSITIONS = {
     "top": (0.5, 0.12), "upper_third": (0.5, 0.28), "center": (0.5, 0.5),
     "lower_third": (0.5, 0.70), "bottom": (0.5, 0.80),
@@ -112,6 +114,9 @@ class Tokens:
         self.motion = self.kit.get("motion") or {}
         self.logo = self.kit.get("logo") or {}
         self.end_card = self.kit.get("end_card") or {}
+        shadow = self.kit.get("text_shadow")
+        self.shadow = None if shadow is False else {
+            "color": "#000000", "opacity": 0.55, "blur_ratio": 0.014, "offset_ratio": 0.009, **(shadow or {})}
 
     def _font(self, value: str | None) -> str | None:
         if not value:
@@ -140,6 +145,42 @@ class Tokens:
 
 
 # ---------------------------------------------------------------- card specs
+
+def highlight_spans(line: str, words: list[str], color: str) -> list[dict]:
+    """Colour every occurrence of the highlighted words (UTF-16 offsets)."""
+    spans = []
+    for word in words or []:
+        start = line.find(word)
+        while word and start >= 0:
+            spans.append({"start": len(line[:start].encode("utf-16-le")) // 2,
+                          "length": len(word.encode("utf-16-le")) // 2, "color": color})
+            start = line.find(word, start + len(word))
+    return spans
+
+
+def apply_style(spec: dict, element: dict, tokens: Tokens, canvas: tuple[int, int]) -> dict:
+    """Compositions that change the card itself (``two_tone``, ``boxed``) and
+    word highlights. ``kicker`` / ``underline`` are layered in build_element."""
+    style = element.get("style", "stacked")
+    accent = (tokens.shapes.get("headline") or {}).get("accent") or (
+        tokens.accent if tokens.branded and tokens.accent.upper() != tokens.text.upper() else "#FFD23F")
+    lines = spec.get("lines") or []
+    for line in lines:
+        spans = highlight_spans(line["text"], element.get("highlight") or [], accent)
+        if spans:
+            line["spans"] = spans
+    if style == "two_tone" and len(lines) > 1:
+        lines[-1]["color"] = accent
+        lines[-1]["size"] *= 1.12
+    if style == "boxed":
+        u = min(canvas)
+        size = lines[0]["size"] if lines else u * 0.08
+        spec.update({"fill": {"colors": [tokens.primary if tokens.branded else "#000000CC"]},
+                     "radius": u * 0.02, "padX": round(size * 0.45), "padY": round(size * 0.25)})
+        for key in ("extrude", "glow"):
+            spec.pop(key, None)
+    return spec
+
 
 def card_spec(element: dict, tokens: Tokens, canvas: tuple[int, int]) -> dict:
     """Translate a semantic element + brand tokens into a CoreText card."""
@@ -219,13 +260,25 @@ def _ensure_renderer() -> Path:
     return SWIFT_BINARY
 
 
+def text_engine() -> str:
+    """``coretext`` on macOS, else ``pil`` (Pillow + libraqm). Override with
+    VIDEO_USE_TEXT_ENGINE=pil|coretext."""
+    import os
+    forced = os.environ.get("VIDEO_USE_TEXT_ENGINE")
+    if forced in {"pil", "coretext"}:
+        return forced
+    return "coretext" if sys.platform == "darwin" and shutil.which("swiftc") else "pil"
+
+
 def rasterize_cards(cards: list[dict], workdir: Path) -> None:
-    """Render every card whose PNG is missing in one CoreText process."""
+    """Render every card whose PNG is missing (CoreText, or Pillow on Linux)."""
     todo = [c for c in cards if not Path(c["file"]).exists()]
     if not todo:
         return
-    if sys.platform != "darwin":
-        raise RuntimeError("graphics text rendering uses macOS CoreText; run on macOS")
+    if text_engine() == "pil":
+        from text_render import render_cards
+        render_cards([{k: v for k, v in card.items() if v is not None} for card in todo])
+        return
     payload = workdir / "cards.json"
     clean = [{k: v for k, v in card.items() if v is not None} for card in todo]
     payload.write_text(json.dumps({"cards": clean}, ensure_ascii=False), encoding="utf-8")
@@ -233,6 +286,61 @@ def rasterize_cards(cards: list[dict], workdir: Path) -> None:
 
 
 # ---------------------------------------------------------------- motion
+
+def add_drop_shadow(image: Image.Image, shadow: dict | None, unit: float, angle_deg: float = 90.0) -> Image.Image:
+    """A soft drop shadow cast from the card's own alpha, so text and pills
+    read on any picture. Grows the canvas to fit the blur and offset."""
+    if not shadow:
+        return image
+    blur = max(1.0, unit * float(shadow.get("blur_ratio", 0.014)))
+    dist = unit * float(shadow.get("offset_ratio", 0.009))
+    dx = round(dist * math.cos(math.radians(angle_deg)) * 0.35)
+    dy = round(dist * math.sin(math.radians(angle_deg)))
+    pad = math.ceil(blur * 2.5) + max(abs(dx), abs(dy))
+    out = Image.new("RGBA", (image.width + 2 * pad, image.height + 2 * pad), (0, 0, 0, 0))
+    alpha = image.getchannel("A").point(lambda v: round(v * float(shadow.get("opacity", 0.55))))
+    shade_layer = Image.new("RGBA", image.size, _rgb(shadow.get("color", "#000000")) + (0,))
+    shade_layer.putalpha(alpha)
+    blurred = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    blurred.alpha_composite(shade_layer, (pad + dx, pad + dy))
+    out.alpha_composite(blurred.filter(ImageFilter.GaussianBlur(blur)))
+    out.alpha_composite(image, (pad, pad))
+    return out
+
+
+def stack_layers(parts: list[tuple[Image.Image, float]], gap: int) -> tuple[Image.Image, list[tuple[Image.Image, tuple[int, int], float]]]:
+    """Centre images vertically in one box: (composite, [(image, (x, y), delay)])."""
+    width = max(img.width for img, _ in parts)
+    height = sum(img.height for img, _ in parts) + gap * (len(parts) - 1)
+    layers, y = [], 0
+    for img, delay in parts:
+        layers.append((img, ((width - img.width) // 2, y), delay))
+        y += img.height + gap
+    composite = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for img, pos, _ in layers:
+        composite.alpha_composite(img, pos)
+    return composite, layers
+
+
+def underline_bar(width: int, unit: float, color: str) -> Image.Image:
+    bar_h = max(4, round(unit * 0.012))
+    bar = Image.new("RGBA", (width, bar_h), (0, 0, 0, 0))
+    ImageDraw.Draw(bar).rounded_rectangle((0, 0, width - 1, bar_h - 1), radius=bar_h // 2, fill=_rgb(color) + (255,))
+    return bar
+
+
+def reveal_at(anim: str, t: float, in_s: float, steps: int = 1) -> tuple[float, float]:
+    """(revealed fraction 0–1, blur 0–1) for wipe / typewriter / blur entrances."""
+    p = 1.0 if in_s <= 0 else max(0.0, min(1.0, t / in_s))
+    if anim == "wipe":
+        return ease_out_cubic(p), 0.0
+    if anim == "typewriter":
+        steps = max(1, steps)
+        return min(1.0, math.ceil(p * steps) / steps) if p > 0 else 0.0, 0.0
+    if anim == "blur":
+        return 1.0, 1 - ease_out_cubic(p)
+    return 1.0, 0.0
+
 
 def ease_out_back(t: float, overshoot: float = 1.70158) -> float:
     t -= 1
@@ -261,6 +369,17 @@ def transform_at(anim: str, t: float, duration: float, in_s: float, out_s: float
         alpha = min(1.0, p_in / 0.5)
     elif anim == "fade":
         alpha = ease_out_cubic(p_in)
+    elif anim == "drop":
+        dy = -unit * 0.07 * (1 - ease_out_back(p_in, 1.6))
+        alpha = min(1.0, p_in / 0.25)
+    elif anim == "stamp":
+        scale = 1.55 - 0.55 * ease_out_cubic(min(1.0, p_in * 1.25))
+        alpha = min(1.0, p_in / 0.2)
+    elif anim == "zoom":
+        scale = 0.82 + 0.18 * ease_out_cubic(p_in)
+        alpha = ease_out_cubic(p_in)
+    elif anim in ("blur", "wipe", "typewriter"):
+        alpha = 1.0 if anim != "blur" else ease_out_cubic(p_in)
     alpha *= 1 - p_out
     return scale, dx, dy, alpha
 
@@ -290,34 +409,66 @@ def encode_alpha_mov(frames, size: tuple[int, int], rate: str, out: Path) -> Non
 
 
 def animate_image(image: Image.Image, anim: str, duration: float, rate: str, tokens: Tokens,
-                  unit: float, direction: int = 1, out_ms: float = 160):
-    """Yield (box_size, frames) for a card animated inside a fixed box."""
-    in_s = 0.0 if anim == "none" else min(duration * 0.45, tokens.in_ms / 1000)
+                  unit: float, direction: int = 1, out_ms: float = 160,
+                  layers: list[tuple[Image.Image, tuple[int, int], float]] | None = None, steps: int = 1):
+    """Yield (box_size, frames) for a card animated inside a fixed box.
+
+    ``layers`` animates the parts of a composition one after another (a
+    kicker, then the headline, then its underline) instead of as one block.
+    ``direction`` is -1 for left-to-right text, 1 for right-to-left: slides
+    and wipes enter from the side reading starts on.
+    """
+    in_s = 0.0 if anim == "none" else min(duration * 0.45, tokens.in_ms / 1000 * (1.8 if anim == "typewriter" else 1))
     out_s = 0.0 if anim == "none" else min(duration * 0.25, out_ms / 1000)
     pad_x = round(unit * 0.12) + 4 if anim == "slide" else 4
-    pad_y = round(unit * 0.05) + 4 if anim == "rise" else 4
-    grow = 1.12 if anim == "pop" else 1.0
+    pad_y = round(unit * 0.08) + 4 if anim in ("rise", "drop") else 4
+    grow = {"pop": 1.12, "stamp": 1.6}.get(anim, 1.0)
+    if layers is None and grow > 1 and image.width * grow > unit * 1.0:
+        grow = max(1.0, unit * 1.0 / image.width)  # wide cards stamp in from a smaller overshoot
     box = (math.ceil(image.width * grow) + 2 * pad_x, math.ceil(image.height * grow) + 2 * pad_y)
     box = (box[0] + box[0] % 2, box[1] + box[1] % 2)
+    parts = layers or [(image, (0, 0), 0.0)]
+    origin = ((box[0] - image.width) / 2, (box[1] - image.height) / 2)
     total = _frame_count(duration, rate)
     fps = float(Fraction(rate))
     cache: dict[tuple, bytes] = {}
 
+    def shaped(img: Image.Image, t: float) -> tuple[Image.Image, float, float]:
+        s, dx, dy, a = transform_at(anim, t, duration, in_s, out_s, unit, direction)
+        s = min(s, (box[0] - 2) / max(1, img.width), (box[1] - 2) / max(1, img.height))  # never cropped by its box
+        shown, blur = reveal_at(anim, t, in_s, steps)
+        out = img
+        if shown < 0.999:
+            keep = max(0, round(img.width * shown))
+            mask = Image.new("L", img.size, 0)
+            # RTL reveals from the right edge, LTR from the left.
+            box_x = (img.width - keep, 0, img.width, img.height) if direction > 0 else (0, 0, keep, img.height)
+            mask.paste(255, box_x)
+            out = img.copy()
+            out.putalpha(Image.composite(img.getchannel("A"), mask, mask))
+        if blur > 0.01:
+            out = out.filter(ImageFilter.GaussianBlur(unit * 0.02 * blur))
+        if abs(s - 1) > 1e-4:
+            out = out.resize((max(1, round(out.width * s)), max(1, round(out.height * s))), Image.LANCZOS)
+        if a < 0.999:
+            out = out.copy()
+            out.putalpha(out.getchannel("A").point(lambda v, a=a: round(v * a)))
+        return out, dx, dy
+
     def frames():
         for index in range(total):
-            s, dx, dy, a = transform_at(anim, index / fps, duration, in_s, out_s, unit, direction)
-            key = (round(s, 4), round(dx, 1), round(dy, 1), round(a, 3))
+            t = index / fps
+            key = tuple(round(max(0.0, t - d), 3) if t - d < in_s + 0.01 else -1 for _i, _p, d in parts) \
+                + ((round(t, 3),) if t > duration - out_s else ())
             if key not in cache:
                 canvas = Image.new("RGBA", box, (0, 0, 0, 0))
-                sized = image if abs(s - 1) < 1e-4 else image.resize(
-                    (max(1, round(image.width * s)), max(1, round(image.height * s))), Image.LANCZOS)
-                if a < 0.999:
-                    alpha = sized.getchannel("A").point(lambda v, a=a: round(v * a))
-                    sized = sized.copy()
-                    sized.putalpha(alpha)
-                x = round((box[0] - sized.width) / 2 + dx)
-                y = round((box[1] - sized.height) / 2 + dy)
-                canvas.alpha_composite(sized, (x, y))
+                for img, (lx, ly), delay in parts:
+                    if t < delay:
+                        continue
+                    sized, dx, dy = shaped(img, t - delay)
+                    cx = origin[0] + lx + img.width / 2
+                    cy = origin[1] + ly + img.height / 2
+                    canvas.alpha_composite(sized, (round(cx - sized.width / 2 + dx), round(cy - sized.height / 2 + dy)))
                 if len(cache) > 400:
                     cache.clear()
                 cache[key] = canvas.tobytes()
@@ -333,13 +484,19 @@ def output_time(edl: dict, at: dict, rate: str) -> float:
     from render import segment_timing  # local import: render imports this module
     ranges = edl.get("ranges") or []
     for item, (_frames, offset, duration) in zip(ranges, segment_timing(ranges, rate)):
-        if item.get("source") == at.get("source") and float(item["start"]) <= float(at["time"]) <= float(item["end"]):
-            return round(offset + min(duration, float(at["time"]) - float(item["start"])), 3)
+        sound = item.get("audio_source") if isinstance(item.get("audio_source"), dict) else None
+        source = sound["source"] if sound else item.get("source")
+        start = float(sound.get("start", item["start"])) if sound else float(item["start"])
+        end = start + float(item["end"]) - float(item["start"])
+        if source == at.get("source") and start <= float(at["time"]) <= end:
+            return round(offset + min(duration, float(at["time"]) - start), 3)
     raise ValueError(f"graphic anchor {at} is not inside any kept range")
 
 
-def place(position: Any, box: tuple[int, int], canvas: tuple[int, int]) -> tuple[int, int]:
-    """Centre the box on a named or normalized point, clamped to the safe area."""
+def place(position: Any, box: tuple[int, int], canvas: tuple[int, int], bleed: bool = False) -> tuple[int, int]:
+    """Centre the box on a named or normalized point, clamped to the safe area
+    (``bleed``: decorative layers — e.g. big text behind the subject — may run
+    off the frame edge instead)."""
     w, h = canvas
     if isinstance(position, dict):
         cx, cy = float(position.get("x", 0.5)), float(position.get("y", 0.5))
@@ -350,6 +507,8 @@ def place(position: Any, box: tuple[int, int], canvas: tuple[int, int]) -> tuple
     bottom = h - round(h * (0.14 if h > w else 0.05))  # vertical: clear platform UI
     x = round(cx * w - box[0] / 2)
     y = round(cy * h - box[1] / 2)
+    if bleed:
+        return x, y
     x = min(max(x, margin_x - 4), max(margin_x - 4, w - margin_x - box[0] + 4))
     y = min(max(y, top - 4), max(top - 4, bottom - box[1] + 4))
     return x, y
@@ -360,13 +519,14 @@ def place(position: Any, box: tuple[int, int], canvas: tuple[int, int]) -> tuple
 def _code_version() -> str:
     """Changes whenever the renderer code changes, so cached graphics refresh."""
     h = hashlib.sha1()
-    for source in (Path(__file__), SWIFT_SOURCE):
+    for source in (Path(__file__), SWIFT_SOURCE, Path(__file__).with_name("text_render.py"),
+                   Path(__file__).with_name("text_styles.py")):
         h.update(source.read_bytes())
     return h.hexdigest()[:8]
 
 
 def _digest(*parts: Any) -> str:
-    blob = json.dumps([_code_version(), *parts], sort_keys=True, ensure_ascii=False, default=str)
+    blob = json.dumps([_code_version(), text_engine(), *parts], sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
@@ -451,15 +611,75 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
         if opacity < 1:
             image.putalpha(image.getchannel("A").point(lambda v: round(v * opacity)))
         position = element.get("position") or tokens.logo.get("placement") or DEFAULT_POSITION["logo"]
+    elif element.get("text_style"):
+        from text_styles import render_styled, resolve_style
+        recipe = resolve_style(str(element["text_style"]), tokens)
+        if recipe is None:
+            raise ValueError(f"unknown text_style {element['text_style']!r}: add it to the brand kit's text_styles")
+        anim = element.get("animation") or recipe.get("animation") or anim
+        shadow = None if element.get("shadow") is False else tokens.shadow
+        parts = render_styled(element, recipe, tokens, canvas, workdir, rasterize_cards)
+        full_width = bool(recipe.get("streaks"))
+        limit = w * (1.0 if full_width else 0.9)
+        parts = [(img if img.width <= limit or full_width else img.resize(
+            (round(limit), max(1, round(img.height * limit / img.width))), Image.LANCZOS), d) for img, d in parts]
+        parts = [(add_drop_shadow(img, shadow, unit), d) for img, d in parts]
+        tight = -round(unit * float(recipe.get("line_overlap", 0.03)))  # glow/shadow pads would space lines apart
+        image, layers = (stack_layers(parts, tight) if len(parts) > 1 else (parts[0][0], None))
+        rtl = any("֐" <= ch <= "ࣿ" for ch in str(element.get("text") or ""))
+        box, frames = animate_image(image, anim, duration, rate, tokens, unit, direction=1 if rtl else -1, layers=layers)
+        if not out.exists():
+            encode_alpha_mov(frames, box, rate, out)
+        position = element.get("position") or DEFAULT_POSITION.get(kind, "upper_third")
+        x, y = place(position, box, canvas, bleed=bool(element.get("bleed", element.get("behind_subject"))))
+        if full_width:
+            x = (w - box[0]) // 2
+        return {"file": str(out), "start_in_output": start, "duration": duration, "x": x, "y": y,
+                "w": box[0], "h": box[1], "type": kind, "full_width": full_width}
     else:
-        spec = card_spec(element, tokens, canvas)
+        shadow = None if element.get("shadow") is False else tokens.shadow
+        spec = apply_style(card_spec(element, tokens, canvas), element, tokens, canvas)
+        if shadow:
+            spec.pop("shadow", None)  # one shadow, drawn below for every engine
         spec["file"] = str(workdir / f"card_{key}.png")
-        rasterize_cards([spec], workdir)
+        cards = [spec]
+        if element.get("style") == "kicker" and element.get("kicker"):
+            kicker = card_spec({"type": "sticker", "text": str(element["kicker"]), "scale": 0.8}, tokens, canvas)
+            kicker.pop("shadow", None)
+            kicker["file"] = str(workdir / f"kicker_{key}.png")
+            cards.append(kicker)
+        rasterize_cards(cards, workdir)
         image = Image.open(spec["file"]).convert("RGBA")
         tilt = float(element.get("tilt", (tokens.shapes.get("sticker") or {}).get("tilt", -3) if kind == "sticker" else 0))
         if tilt:
             image = image.rotate(tilt, resample=Image.BICUBIC, expand=True)
+        parts = [(image, 0.0)]
+        if len(cards) > 1:
+            parts.insert(0, (Image.open(cards[1]["file"]).convert("RGBA"), 0.0))
+            parts[1] = (image, 0.12)
+        if element.get("style") == "underline":
+            accent = (tokens.shapes.get("headline") or {}).get("accent") or tokens.accent
+            parts.append((underline_bar(round(image.width * 0.7), unit, accent), 0.12 * len(parts)))
+        # Never wider than the safe area: a long line or a big style scales down
+        # instead of running off the frame.
+        limit = w * 0.9
+        parts = [(img if img.width <= limit else img.resize((round(limit), max(1, round(img.height * limit / img.width))),
+                                                             Image.LANCZOS), d) for img, d in parts]
+        parts = [(add_drop_shadow(img, shadow, unit), d) for img, d in parts]
+        if len(parts) > 1:
+            image, layers = stack_layers(parts, round(unit * 0.012))
+        else:
+            image, layers = parts[0][0], None
         position = element.get("position") or DEFAULT_POSITION[kind]
+        rtl = any("֐" <= ch <= "ࣿ" for ch in str(element.get("text") or element.get("title") or ""))
+        steps = len(str(element.get("text") or "").split()) if anim == "typewriter" else 1
+        box, frames = animate_image(image, anim, duration, rate, tokens, unit, direction=1 if rtl else -1,
+                                    layers=layers, steps=steps)
+        if not out.exists():
+            encode_alpha_mov(frames, box, rate, out)
+        x, y = place(position, box, canvas)
+        return {"file": str(out), "start_in_output": start, "duration": duration, "x": x, "y": y,
+                "w": box[0], "h": box[1], "type": kind}
 
     rtl = any("֐" <= ch <= "ࣿ" for ch in str(element.get("text") or element.get("title") or ""))
     box, frames = animate_image(image, anim, duration, rate, tokens, unit, direction=1 if rtl else -1)
@@ -470,7 +690,56 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
             "w": box[0], "h": box[1], "type": kind}
 
 
-def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str) -> tuple[list[dict], list[dict]]:
+def _overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return a0 < b1 and b0 < a1
+
+
+def clear_of_faces(entry: dict, faces: list[dict], canvas: tuple[int, int], placed: list[dict] | None = None) -> dict:
+    """Move a graphic to the nearest position that covers no face and no
+    graphic already on screen at the same time.
+
+    Rule: text never sits on anyone's face. Searches vertical then horizontal
+    offsets inside the safe area; full-frame cards are left alone.
+    """
+    gap = canvas[1] * 0.008
+    others = [{**g, "x": g["x"] - gap, "y": g["y"] - gap, "w": g["w"] + 2 * gap, "h": g["h"] + 2 * gap}
+              for g in (placed or []) if g.get("w") and g.get("type") != "end_card"]
+    faces = list(faces) + others
+    if entry.get("type") in {"end_card", "captions"} or not faces:
+        return entry
+    w, h = canvas
+    t0, t1 = float(entry["start_in_output"]), float(entry["start_in_output"]) + float(entry["duration"])
+    active = [f for f in faces if _overlap(t0, t1, f["start_in_output"], f["start_in_output"] + f["duration"])]
+    ew, eh = float(entry.get("w", 0)), float(entry.get("h", 0))
+
+    def hits(x: float, y: float) -> bool:
+        return any(_overlap(x, x + ew, f["x"], f["x"] + f["w"]) and _overlap(y, y + eh, f["y"], f["y"] + f["h"]) for f in active)
+
+    x0, y0 = float(entry["x"]), float(entry["y"])
+    if not hits(x0, y0):
+        return entry
+    top, bottom = h * 0.04, h * (0.86 if h > w else 0.95) - eh
+    left, right = w * 0.03, w * 0.97 - ew
+    step = h * 0.01
+    candidates = []
+    for k in range(1, 200):
+        for y in (y0 - k * step, y0 + k * step):
+            if top <= y <= bottom:
+                candidates.append((abs(y - y0), x0, y))
+    for k in range(1, 0 if entry.get("full_width") else 100):  # full-width bands only move vertically
+        for x in (x0 - k * step, x0 + k * step):
+            if left <= x <= right:
+                candidates.append((abs(x - x0) * 1.5, x, y0))
+    for _cost, x, y in sorted(candidates):
+        if not hits(x, y):
+            print(f"    moved {entry.get('type')} clear of faces/graphics: ({x0:.0f},{y0:.0f}) → ({x:.0f},{y:.0f})")
+            return {**entry, "x": round(x), "y": round(y)}
+    print(f"    warning: no face-free spot for {entry.get('type')} at {t0:.2f}s; check this frame")
+    return entry
+
+
+def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str,
+                   faces: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Render every EDL graphic. Returns (top_overlays, behind_subject_overlays)."""
     elements = edl.get("graphics") or []
     if not elements:
@@ -485,6 +754,8 @@ def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str
             print("  graphic logo skipped: the brand kit has no logo file (brand-neutral edit)")
             continue
         entry = build_element(element, edl, tokens, canvas, rate, workdir)
+        if not element.get("behind_subject"):  # behind the person, the person itself keeps the face clear
+            entry = clear_of_faces(entry, faces or [], canvas, top + behind)
         print(f"  graphic {element['type']:<11} @ {entry['start_in_output']:.2f}s → {Path(entry['file']).name}")
         (behind if element.get("behind_subject") else top).append(entry)
     return top, behind
@@ -503,6 +774,11 @@ def validate_graphics(edl: dict, total: float) -> list[tuple[str, str, str, str]
             issues.append(("error", "graphic_missing_text", f"{kind} needs text.", f"{path}.text"))
         if kind == "lower_third" and not (element.get("title") or element.get("text")):
             issues.append(("error", "graphic_missing_text", "lower_third needs title.", f"{path}.title"))
+        if element.get("text_style") is not None and not isinstance(element.get("text_style"), str):
+            issues.append(("error", "invalid_text_style", "text_style must be a style name.", f"{path}.text_style"))
+        style = element.get("style")
+        if style is not None and style not in STYLES:
+            issues.append(("error", "invalid_graphic_style", f"style must be one of {sorted(STYLES)}.", f"{path}.style"))
         anim = element.get("animation")
         if anim is not None and anim not in ANIMATIONS:
             issues.append(("error", "invalid_graphic_animation", f"animation must be one of {sorted(ANIMATIONS)}.", f"{path}.animation"))
