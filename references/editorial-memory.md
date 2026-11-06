@@ -78,3 +78,9 @@ These came from real feedback on testimonial and promo reels. Each is a craft ru
 - **Text behind people:** only what sticks out reads. Scale the number until it frames the head, or put the word above the head.
 - **Sound:** an effect without a sound feels unfinished, and a sound on every gentle zoom feels cheap. Pick from the editor's own library before synthesising.
 - **Brand assets:** use the full logo with the wordmark, cut out cleanly. Never just the mark when the name is the point.
+
+- **Denial beat:** when the speaker negates who they are or what they are ("I'm not X"), give the negation its own short beat (13 frames). Use a colour strobe behind the person (2–3 flashes) with the person in front via the local matte, and an "error" buzzer 0.2 s early. It turns a spoken joke into a visual one.
+- **Text timing:** a graphic is timed to be *readable* on its word, so start it early by its entrance's readable lead. Don't simply start it before the word, and don't start it on the word.
+- **Outros:** the outro covers everything once it shows: graphics and captions end before it. It fades in over the last shot's picture (about 0.3 s, never via black) and needs no whoosh.
+- **Text behind people** wants a hard drop shadow (no softness) so it separates from the background. Put a spoken number beside the hand that counts it.
+- **Hand-finished edits are lessons:** when the editor finishes the tool's build by hand, diff it, learn each change, and reuse their finished sequences as the exemplars to copy-paste from next time.

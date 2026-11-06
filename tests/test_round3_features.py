@@ -501,3 +501,34 @@ class PremiereExportTests(unittest.TestCase):
         self.assertIn("<start>60</start><end>75</end><in>30</in><out>45</out>", clip)
         self.assertIn("<value>0.50119</value>", clip)
         self.assertIn("<mediatype>audio</mediatype>", clip)
+
+
+class FinishingLessonTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_denial_beats_match_the_editor(self):
+        from beats import find_denials
+        w = lambda t, a, b: {"type": "word", "text": t, "start": a, "end": b}
+        words = [w("أنا", 5.56, 5.64), w("اسمي", 5.68, 5.84), w("مش", 5.86, 5.98), w("ممدوح،", 6.02, 6.40),
+                 w("محمد،", 6.80, 7.10), w("وأنا", 7.26, 7.42), w("مش", 7.44, 7.56), w("data", 7.58, 7.76),
+                 w("مش", 9.0, 9.2), w("عارفة", 9.2, 9.5)]
+        got = [(s, round(e - s, 3)) for s, e, _ in find_denials(words)]
+        self.assertEqual(got, [(5.8, 0.433), (7.26, 0.433)])  # the bare "مش عارفة" is no denial of identity
+
+    def test_outro_is_detected_and_never_dips_to_black(self):
+        from render import outro_index, resolve_transitions
+        edl = {"ranges": [{"source": "A", "start": 0, "end": 2}, {"source": "OUT", "start": 0, "end": 3, "outro": True,
+                                                                   "transition": {"type": "fade", "in_ms": 600}}]}
+        self.assertEqual(outro_index(edl), 1)
+        self.assertEqual(resolve_transitions(edl)[1]["type"], "dissolve")
+
+    def test_word_anchored_graphic_is_readable_on_its_word(self):
+        from graphics import Tokens, graphic_start, readable_lead
+        tok = Tokens({}, Path("."))
+        edl = {"ranges": [{"source": "A", "start": 0, "end": 10}]}
+        g = {"type": "headline", "text": "x", "at": {"source": "A", "time": 4.0}, "duration": 2, "animation": "rise"}
+        lead = readable_lead("rise", 2, tok)
+        self.assertGreater(lead, 0)
+        self.assertAlmostEqual(graphic_start(g, edl, tok, "30/1"), 4.0 - lead, places=3)
+        self.assertEqual(graphic_start(dict(g, anticipate=False), edl, tok, "30/1"), 4.0)

@@ -65,7 +65,11 @@ class Bridge:
         with urllib.request.urlopen(self.url + "/ping", timeout=3) as r:
             return json.loads(r.read())
 
+    sequence: str | None = None  # every call after the sequence exists names it explicitly
+
     def __call__(self, fn: str, **args: Any) -> dict:
+        if self.sequence and "sequence" not in args and fn not in ("importFiles", "newSequence", "sequences", "ping", "save"):
+            args["sequence"] = self.sequence
         self.log.append({"fn": fn, "args": args})
         if self.dry:
             return {"ok": True, "dry": True}
@@ -318,6 +322,37 @@ def learn_from(seq: dict) -> dict:
     return house
 
 
+def house_text_lead(brand: dict) -> float:
+    """Seconds from a text graphic's first frame until the editor's entrance
+    makes it readable (its opacity ramp reaching ~60%)."""
+    house = brand.get("premiere_house") or {}
+    ramp = 0.0
+    for t in house.get("text_tracks") or []:
+        for anim in t.get("entrance") or []:
+            if anim["prop"] == "Opacity" and len(anim["keys"]) >= 2:
+                ramp = max(ramp, float(anim["keys"][-1]["t"]) - float(anim["keys"][0]["t"]))
+    ramp = max(ramp, float(house.get("text_fade_s", 0.1)))
+    return round(0.6 * ramp, 3) if ramp else 0.15
+
+
+def text_companions(seq: dict, layers: list[dict]) -> list[dict]:
+    """The sounds that come with a text graphic in the editor's sequence:
+    audio clips starting just before / with its first layer, with their
+    offset, trim and a location to paste their volume from."""
+    if not layers:
+        return []
+    base = min(float(l["exemplar"]["start"]) for l in layers)
+    out = []
+    for track in seq["audio"]:
+        for clip in track["clips"]:
+            off = clip["start"] - base
+            if -0.5 <= off <= 0.8 and (clip.get("item") or {}).get("path"):
+                out.append({"file": clip["item"]["path"], "offset": round(off, 3), "in": round(clip.get("inPoint", 0), 3),
+                            "duration": round(clip["end"] - clip["start"], 3),
+                            "exemplar": {"sequence": seq["name"], "track": track["index"], "start": clip["start"]}})
+    return sorted(out, key=lambda c: c["offset"])
+
+
 def favourite_sfx_map(house: dict) -> dict[str, str]:
     """Role → the editor's most-used file for it, resolved in the material index."""
     try:
@@ -335,7 +370,10 @@ def favourite_sfx_map(house: dict) -> dict[str, str]:
                 break
     return out
 
-def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
+SECTIONS = ("picture", "zoom", "light", "behind", "graphics", "sfx", "captions")
+
+
+def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set[str] | None = None) -> dict:
     from export_timeline import _cutout, _flatten, _resolve, probe
     from face_anchor import range_face_centers
     from graphics import load_brand_kit
@@ -391,6 +429,19 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
     for k, o in enumerate(rendered):
         element = next((g for g in gfx_elements if (g.get("covers") or g.get("text") or g.get("title") or "") == (o.get("text") or "")
                         and g.get("type") == o.get("type")), None)
+        text_layers = (brand.get("premiere_house") or {}).get("text_layers")
+        if element and text_layers and element.get("type") in ("headline", "sticker", "title_card", "lower_third"):
+            # The editor's own text graphic: their layers copied with every
+            # setting; the words go in a marker for them to type in Source Text.
+            # Timed so the text is *readable* on its word with their entrance.
+            start_g = float(o["start_in_output"])
+            if o.get("word_time") is not None:
+                text_layer_off = max(float(l.get("offset", 0)) for l in text_layers)
+                start_g = max(0.0, float(o["word_time"]) - house_text_lead(brand) - text_layer_off)
+            end_g = float(o["start_in_output"]) + float(o["duration"])
+            graphics.append({"layers": text_layers, "start": start_g, "duration": end_g - start_g,
+                             "text": str(element.get("text", "")).replace("\n", " ")})
+            continue
         recipe = resolve_style(str(element["text_style"]), tokens) if element and element.get("text_style") else None
         mg = (recipe or {}).get("mogrt")
         house_templates = (brand.get("premiere_house") or {}).get("templates") or {}
@@ -428,21 +479,32 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
             t0 = float(item["start_in_output"]) if "start_in_output" in item else output_time(edl, item["at"], rate)
             hand.append({"file": str(_resolve(item["file"], base_dir)), "start_in_output": t0, "gain_db": float(item.get("gain_db", -6)),
                          "label": Path(str(item["file"])).stem})
+        if edl.get("beats"):
+            from beats import expand
+            for item in expand(edl, base_dir, canvas, rate, brand)[1]:
+                hand.append({"file": item["file"], "start_in_output": item["start_in_output"], "gain_db": item["gain_db"], "label": "denial"})
         picked = auto_sfx(edl, base_dir, rate, brand, resolve_at=lambda at: output_time(edl, at, rate))
+        own = {str(g.get("text", "")).replace("\n", " ")[:30] for g in gfx_elements} if (brand.get("premiere_house") or {}).get("text_sfx") else set()
         sfx = hand + [{"file": i["file"], "start_in_output": i["start_in_output"], "gain_db": i["gain_db"], "label": i.get("auto")}
-                      for i in picked]
+                      for i in picked if not (str(i.get("auto", "")).startswith("graphic:") and i.get("label", "")[:30].replace("\n", " ") in own)]
 
     imports = sorted({str(p) for p in sources.values()} | {str(c) for c, *_ in lights} | {str(f) for f, *_ in behind}
                      | {str(c) for c, *_ in cutouts} | {str(g["file"]) for g in graphics if "file" in g}
-                     | {str(_resolve(s["file"], base_dir)) for s in sfx} | {str(srt)})
+                     | {str(_resolve(s["file"], base_dir)) for s in sfx} | {str(srt)}
+                     | {str(c["file"]) for c in (brand.get("premiere_house") or {}).get("text_sfx") or []})
 
     # ---- drive Premiere
     if project and not bridge.dry:
         bridge("newProject", path=str(project)) if not project.exists() else bridge("openProject", path=str(project))
     bin_name = title
     bridge("importFiles", paths=imports, bin=bin_name)
-    bridge("newSequence", name=title, **{"from": str(sources[ranges[0]["source"]])}, bin=bin_name,
-           width=canvas[0], height=canvas[1], fps=fps, replace=True)
+    def want(section: str) -> bool:
+        return not only or section in only
+    bridge.sequence = None
+    if not only:  # a full build starts a clean sequence; --only updates the existing one in place
+        bridge("newSequence", name=title, **{"from": str(sources[ranges[0]["source"]])}, bin=bin_name,
+               width=canvas[0], height=canvas[1], fps=fps, replace=True)
+    bridge.sequence = title
     sfx_lanes = spread([(float(s["start_in_output"]), float(s["start_in_output"]) + float(probe(_resolve(s["file"], base_dir))
                          .get("format", {}).get("duration", 0.5) or 0.5)) for s in sfx])
     house_zoom = (brand.get("premiere_house") or {}).get("zoom") or {}
@@ -454,14 +516,38 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
     T_LIGHT, T_BEHIND = 1, 2
     T_CUT = T_BEHIND + n_behind
     T_GFX = T_CUT + 1
+    n_gfx += len((brand.get("premiere_house") or {}).get("text_layers") or [])
     if house_zoom.get("method") == "adjustment_transform":
         house_zoom = dict(house_zoom, track=max(int(house_zoom.get("track", 0)), T_GFX + n_gfx))
     video_tracks = max(video_tracks, T_GFX + n_gfx + 1, int(house_zoom.get("track", 0)) + 1)
-    bridge("ensureTracks", video=video_tracks, audio=1 + max(sfx_lanes + [0]) + 1)
+    n_comp_lanes = 0
+    _comps = (brand.get("premiere_house") or {}).get("text_sfx") or []
+    if _comps and (brand.get("premiere_house") or {}).get("text_layers"):
+        _texts = [g for g in graphics if "layers" in g]
+        n_comp_lanes = 1 + max(spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"])
+                                       for g in _texts for c in _comps]) + [0]) if _texts else 0
+    bridge("ensureTracks", video=video_tracks, audio=1 + max(sfx_lanes + [0]) + 1 + n_comp_lanes)
+    if only:  # clear just the tracks of the parts being updated; everything else (and hand edits) stays
+        n_layers = len((brand.get("premiere_house") or {}).get("text_layers") or [])
+        clear = {"picture": [("video", 0), ("audio", 0)], "light": [("video", T_LIGHT)],
+                 "behind": [("video", T_BEHIND + i) for i in range(n_behind)] + [("video", T_CUT)],
+                 "graphics": [("video", T_GFX + i) for i in range(n_gfx)]
+                             + [("audio", 1 + max(sfx_lanes + [0]) + 1 + i) for i in range(n_comp_lanes)],
+                 "sfx": [("audio", 1 + i) for i in range(1 + max(sfx_lanes + [0]))],
+                 "zoom": [("video", int(house_zoom.get("track", 0)))] if house_zoom.get("method") == "adjustment_transform" else []}
+        for section in only:
+            for kind, idx in clear.get(section, []):
+                bridge("clearTrack", kind=kind, track=idx)
 
     infos = {name: probe(path) for name, path in sources.items()}
     # Sound first (each overwrite then loses its dragged-along picture), then picture.
+    from render import outro_index
+    oi = outro_index(edl, base_dir)
     for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
+        if not want("picture"):
+            break
+        if k == oi:
+            continue  # the outro goes on the top track, over everything (below)
         sound = r.get("audio_source") if isinstance(r.get("audio_source"), dict) else None
         a_src = sources[sound["source"]] if sound else sources[r["source"]]
         a_in = float(sound.get("start", r["start"])) if sound else float(r["start"])
@@ -470,11 +556,14 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
             if r.get("audio_gain_db"):
                 bridge("volume", track=0, start=start, db=float(r["audio_gain_db"]))
     for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
+        if k == oi:
+            continue
         name = r["source"]
         src = sources[name]
         own_sound = not isinstance(r.get("audio_source"), dict)  # the picture's own audio is the dialogue: keep it linked
-        bridge("place", path=str(src), kind="video", track=0, start=start, **{"in": float(r["start"]), "out": float(r["start"]) + dur},
-               name=f"{k + 1:02d} {r.get('beat') or name}", keepAudio=own_sound)
+        if want("picture"):
+            bridge("place", path=str(src), kind="video", track=0, start=start, **{"in": float(r["start"]), "out": float(r["start"]) + dur},
+                   name=f"{k + 1:02d} {r.get('beat') or name}", keepAudio=own_sound)
         video = next((st for st in infos[name].get("streams", []) if st.get("codec_type") == "video"), {})
         sw, sh = int(video.get("width") or canvas[0]), int(video.get("height") or canvas[1])
         rot = rotations.get(name)
@@ -497,8 +586,9 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
         if zoom_house.get("method") == "adjustment_transform" and zoom_house.get("adjustment_item"):
             # The editor's way: picture fitted on V1, the zoom on an Adjustment
             # Layer above it with a Transform effect.
-            bridge("motion", track=0, start=start, keys=[{"t": 0, "scale": cover}], **({"rotation": motion["rotation"]} if rot else {}))
-            if moves:
+            if want("picture"):
+                bridge("motion", track=0, start=start, keys=[{"t": 0, "scale": cover}], **({"rotation": motion["rotation"]} if rot else {}))
+            if moves and want("zoom"):
                 adj_track = int(zoom_house.get("track", 5))
                 bridge("placeItem", nodeId=zoom_house["adjustment_item"], track=adj_track, start=start, duration=dur, name="zoom")
                 ex = house.get("zoom_exemplar")
@@ -513,17 +603,43 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
                     props["Anchor Point"] = {"value": [face[0], face[1]]}
                     props["Position"] = {"value": [face[0], face[1]]}
                 bridge("setProps", track=adj_track, start=start, component=zoom_house.get("effect") or "Transform", props=props)
-        else:
+        elif want("picture") or want("zoom"):
             bridge("motion", **motion)
 
+    if oi is not None and want("picture"):
+        # The outro covers everything: top track, fading in over the picture
+        # (never through black), its sound on its own track.
+        r = ranges[oi]
+        cut = timing[oi][1]
+        overlap = float(((brand.get("premiere_house") or {}).get("outro") or {}).get("overlap_s", 0.33))
+        top = video_tracks  # above every other layer
+        bridge("ensureTracks", video=top + 1, audio=1 + max(sfx_lanes + [0]) + 1 + n_comp_lanes + 1)
+        st = max(0.0, cut - overlap)
+        length = float(r["end"]) - float(r["start"]) + overlap
+        bridge("clearTrack", kind="video", track=top)
+        bridge("place", path=str(sources[r["source"]]), kind="video", track=top, start=st,
+               **{"in": float(r["start"]), "out": float(r["start"]) + length}, name="outro")
+        info = probe(sources[r["source"]])
+        video = next((x for x in info.get("streams", []) if x.get("codec_type") == "video"), {})
+        cover = max(canvas[0] / int(video.get("width") or canvas[0]), canvas[1] / int(video.get("height") or canvas[1])) * 100
+        bridge("motion", track=top, start=st, keys=[{"t": 0, "scale": cover}])
+        bridge("setProps", track=top, start=st, component="Opacity", props={"Opacity": {"keys": [
+            {"t": 0, "v": 0}, {"t": overlap, "v": 100, "ease": "smooth"}]}})
+        if any(x.get("codec_type") == "audio" for x in info.get("streams", [])):
+            a_track = 1 + max(sfx_lanes + [0]) + 1 + n_comp_lanes
+            bridge("clearTrack", kind="audio", track=a_track)
+            bridge("place", path=str(sources[r["source"]]), kind="audio", track=a_track, start=st,
+                   **{"in": float(r["start"]), "out": float(r["start"]) + length})
     for k, spec in enumerate(resolve_transitions(edl, brand)):
-        if spec and spec.get("type") in ("dissolve", "fade", "dip_black", "dip_white"):
+        if k == oi:
+            continue
+        if want("picture") and spec and spec.get("type") in ("dissolve", "fade", "dip_black", "dip_white"):
             name = {"dissolve": "Cross Dissolve", "fade": "Dip to Black", "dip_black": "Dip to Black",
                     "dip_white": "Dip to White"}[spec["type"]]
             ms = float(spec.get("duration_ms") or spec.get("in_ms") or 500)
             bridge("transition", track=0, start=timing[k][1], name=name, duration=ms / 1000, fps=fps)
     leak = (brand.get("premiere_house") or {}).get("light_leak")
-    for clip, start, dur in lights:
+    for clip, start, dur in (lights if want("light") else []):
         if leak and leak.get("nodeId"):  # the editor's own light-leak graphic, centred on the cut
             ld = float(leak.get("typical_duration") or 0.3)
             cut = start + dur * 0.43
@@ -534,11 +650,50 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
                        track=T_LIGHT, start=max(0.0, cut - ld / 2))
         else:
             bridge("place", path=str(clip), kind="video", track=T_LIGHT, start=max(0.0, start), **{"in": 0.0, "out": dur}, name="light flash")
-    for (flat, start, dur, label), lane in zip(behind, behind_lanes):
+    for (flat, start, dur, label), lane in (zip(behind, behind_lanes) if want("behind") else []):
         bridge("place", path=str(flat), kind="video", track=T_BEHIND + lane, start=start, **{"in": 0.0, "out": dur}, name=f"behind: {label}"[:60])
-    for cut, start, dur in cutouts:
+    for cut, start, dur in (cutouts if want("behind") else []):
         bridge("place", path=str(cut), kind="video", track=T_CUT, start=start, **{"in": 0.0, "out": dur}, name="subject cut-out")
-    for g, lane in zip(graphics, gfx_lanes):
+    layered = [g for g in graphics if "layers" in g]
+    graphics = [g for g in graphics if "layers" not in g]
+    gfx_lanes = spread([(g["start"], g["start"] + g["duration"]) for g in graphics])
+    short = title.replace(" (video-use)", "")
+    companions = (brand.get("premiere_house") or {}).get("text_sfx") or []
+    comp_lanes = spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"]) for g in layered for c in companions])
+    first_comp_track = 1 + max(sfx_lanes + [0]) + 1
+    fade = float((brand.get("premiere_house") or {}).get("text_fade_s", 0.1))
+    lane_iter = iter(comp_lanes)
+    for g in (layered if want("graphics") else []):
+        for c in companions:  # the editor's own sounds for this graphic, same offset, trim and level
+            lane = next(lane_iter)
+            at = max(0.0, g["start"] + c["offset"])
+            bridge("place", path=str(c["file"]), kind="audio", track=first_comp_track + lane, start=at,
+                   **{"in": c["in"], "out": c["in"] + c["duration"]})
+            ex = c["exemplar"]
+            bridge("copyAttributes", kind="audio", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"],
+                   track=first_comp_track + lane, start=at)
+        for k, layer in enumerate(g["layers"]):
+            node = layer["nodeId"]
+            if layer.get("aep") and layer.get("comp"):
+                # Its own copy of the composition per text (named after the words):
+                # editing one text never changes the others; updates reuse it.
+                node = bridge("aeCopy", aep=layer["aep"], comp=layer["comp"], bin=bin_name,
+                              name=f"{short} – {g['text'][:40]}").get("nodeId", node)
+            tl = T_GFX + max(gfx_lanes + [-1]) + 1 + k
+            st = g["start"] + float(layer.get("offset", 0))
+            dur = max(0.3, g["duration"] - float(layer.get("offset", 0)))
+            bridge("placeItem", nodeId=node, track=tl, start=st, duration=dur, name=layer.get("name"))
+            ex = layer["exemplar"]
+            bridge("copyAttributes", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"], track=tl, start=st)
+            if fade > 0:  # a quick fade in and out on every layer
+                f = min(fade, dur / 3)
+                bridge("setProps", track=tl, start=st, component="Opacity", props={"Opacity": {"keys": [
+                    {"t": 0, "v": 0}, {"t": f, "v": 100}, {"t": dur - f, "v": 100}, {"t": dur, "v": 0}]}})
+        try:
+            bridge("marker", start=g["start"], duration=g["duration"], name=g["text"], comments="اكتب في Source Text: " + g["text"])
+        except RuntimeError:
+            pass
+    for g, lane in (zip(graphics, gfx_lanes) if want("graphics") else []):
         tg = T_GFX + lane
         if "copy" in g:  # one of the editor's own MOGRTs, with the new words
             bridge("placeItem", nodeId=g["copy"], track=tg, start=g["start"], duration=g["duration"], name=g["name"])
@@ -562,13 +717,13 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None) -> dict:
         else:
             bridge("place", path=str(g["file"]), kind="video", track=tg, start=g["start"], **{"in": 0.0, "out": g["duration"]},
                    name=g["name"])
-    for s, lane in zip(sfx, sfx_lanes):
+    for s, lane in (zip(sfx, sfx_lanes) if want("sfx") else []):
         path = _resolve(s["file"], base_dir)
         dur = float(probe(path).get("format", {}).get("duration", 0.5) or 0.5)
         start = float(s["start_in_output"])
         bridge("place", path=str(path), kind="audio", track=1 + lane, start=start, **{"in": 0.0, "out": dur})
         bridge("volume", track=1 + lane, start=start, db=float(s["gain_db"]))
-    if edl.get("captions"):
+    if edl.get("captions") and (not only or "captions" in only):
         bridge("captions", srt=str(srt), start=0.0)
     # The project is left unsaved: the editor reviews the new sequence, then saves.
     return {"sequence": title, "calls": len(bridge.log), "graphics": len(graphics), "sfx": len(sfx),
@@ -588,6 +743,7 @@ def main() -> None:
     p_build.add_argument("edl", type=Path)
     p_build.add_argument("--project", type=Path, help="create/open this .prproj first (default: the open project)")
     p_build.add_argument("--plan-only", action="store_true", help="print the Premiere calls without sending them")
+    p_build.add_argument("--only", help=f"update just these parts of the existing sequence, comma-separated: {', '.join(SECTIONS)}")
     args = parser.parse_args()
     if args.cmd == "install":
         print(f"panel → {install()}\nIn Premiere: Window → Extensions → Video Use Bridge")
@@ -611,7 +767,10 @@ def main() -> None:
         print(b("ping"))
     else:
         b = Bridge(dry=args.plan_only)
-        result = build(args.edl, b, args.project)
+        only = {x.strip() for x in args.only.split(",")} if args.only else None
+        if only and only - set(SECTIONS):
+            raise SystemExit(f"--only takes: {', '.join(SECTIONS)}")
+        result = build(args.edl, b, args.project, only)
         if args.plan_only:
             print(json.dumps(b.log, ensure_ascii=False, indent=1)[:6000])
         print(json.dumps(result, ensure_ascii=False))

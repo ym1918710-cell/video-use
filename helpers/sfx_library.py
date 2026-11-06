@@ -27,6 +27,7 @@ SOUNDS = ("pop", "whoosh", "swoosh", "impact", "tick", "shimmer", "riser", "soft
 # that match nothing — swords, engines, horror pads, memes — are never picked
 # automatically; place them by hand when a moment calls for them.
 ROLE_KEYWORDS = [
+    ("error", ("error", "wrong", "buzzer", "fail", "lose game", "loser")),
     ("riser", ("riser", "rise ", "uplifter")),
     ("tick", ("typewriter", "teletype", "keyboard", "typing", "ticking", "tick")),
     ("shimmer", ("shine", "glitter", "sparkle", "twinkle", "magic", "camera-flash", "camera flash", "flash")),
@@ -40,7 +41,7 @@ ROLE_KEYWORDS = [
 # Integrated loudness each role should sit at before the final mix (LUFS):
 # effects support the voice, they never compete with it.
 ROLE_LUFS = {"pop": -27, "impact": -25, "tick": -30, "whoosh": -27, "swoosh": -27, "shimmer": -29,
-             "soft": -31, "riser": -28, "zoom": -27}
+             "soft": -31, "riser": -28, "zoom": -27, "error": -27}
 
 
 def classify(name: str) -> str | None:
@@ -159,7 +160,7 @@ def stock_file(name: str, edit_dir: Path) -> Path:
     return path
 
 
-def effect_events(edl: dict, rate: str, brand: dict | None = None) -> list[dict[str, Any]]:
+def effect_events(edl: dict, rate: str, brand: dict | None = None, edit_dir: Path | None = None) -> list[dict[str, Any]]:
     """Every visual effect on the output timeline: (time, kind, sound, label).
 
     Graphic entrances, transitions, keyframed camera moves and zooms. Times are
@@ -174,7 +175,8 @@ def effect_events(edl: dict, rate: str, brand: dict | None = None) -> list[dict[
         if not isinstance(g, dict) or g.get("type") not in DEFAULT_ANIMATION:
             continue
         try:
-            start = output_time(edl, g["at"], rate) if "at" in g and "start_in_output" not in g else float(g["start_in_output"])
+            from graphics import Tokens, graphic_start, load_brand_kit
+            start = graphic_start(g, edl, Tokens(brand or {}, Path(".")), rate)  # the sound lands when it appears
         except Exception:
             continue
         anim = g.get("animation") or DEFAULT_ANIMATION[g["type"]]
@@ -185,8 +187,10 @@ def effect_events(edl: dict, rate: str, brand: dict | None = None) -> list[dict[
                        "duration": float(g.get("duration", 1))})
     ranges = edl.get("ranges") or []
     timing = segment_timing(ranges, rate)
+    from render import outro_index
+    oi = outro_index(edl, edit_dir)
     for i, spec in enumerate(resolve_transitions(edl, brand)):
-        if spec:
+        if spec and i != oi:  # an outro brings its own sound: no whoosh on its dissolve
             events.append({"time": timing[i][1], "kind": f"transition:{spec.get('type')}",
                            "sound": TRANSITION_SOUND.get(spec.get("type"), "whoosh"), "opt": spec.get("sfx"),
                            "label": f"cut {i}"})
@@ -231,7 +235,7 @@ def auto_sfx(edl: dict, edit_dir: Path, rate: str, brand: dict | None = None,
     taken = [t for t in taken if t is not None]
     items: list[dict[str, Any]] = []
     used: dict[str, int] = {}
-    for event in effect_events(edl, rate, brand):
+    for event in effect_events(edl, rate, brand, edit_dir):
         opt = event.get("opt")
         if opt is False or event["sound"] is None and not isinstance(opt, str):
             continue

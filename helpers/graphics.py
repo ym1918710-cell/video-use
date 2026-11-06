@@ -551,16 +551,47 @@ def _load_logo(tokens: Tokens, element: dict) -> Image.Image:
     return image.crop(bbox) if bbox else image
 
 
+# Fraction of the entrance at which a graphic becomes readable (opacity ~60%,
+# blur mostly gone, half a wipe revealed). Measured from transform_at/reveal_at.
+READABLE_AT = {"pop": 0.35, "stamp": 0.2, "drop": 0.25, "rise": 0.3, "fade": 0.3, "zoom": 0.3, "blur": 0.45,
+               "slide": 0.3, "wipe": 0.5, "typewriter": 0.1, "none": 0.0}
+
+
+def readable_lead(anim: str, duration: float, tokens: "Tokens") -> float:
+    """Seconds from a graphic's first frame until it can be read."""
+    if anim == "none":
+        return 0.0
+    in_s = min(duration * 0.45, tokens.in_ms / 1000 * (1.8 if anim == "typewriter" else 1))
+    return round(in_s * READABLE_AT.get(anim, 0.3), 3)
+
+
+def graphic_start(element: dict, edl: dict, tokens: "Tokens", rate: str) -> float:
+    """Output start of a graphic. One anchored to a word (``at``) starts early
+    by its animation's readable lead, so it is *readable* on the word — not
+    merely starting on it (``"anticipate": false`` to opt out)."""
+    if "at" in element and "start_in_output" not in element:
+        start = output_time(edl, element["at"], rate)
+        if element.get("anticipate", True):
+            kind = element.get("type", "sticker")
+            anim = element.get("animation") or DEFAULT_ANIMATION.get(kind, "pop")
+            if element.get("text_style"):
+                try:
+                    from text_styles import resolve_style
+                    anim = element.get("animation") or (resolve_style(str(element["text_style"]), tokens) or {}).get("animation") or anim
+                except Exception:
+                    pass
+            start = max(0.0, start - readable_lead(anim, float(element.get("duration", 1)), tokens))
+        return start
+    return float(element["start_in_output"])
+
+
 def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, int], rate: str,
                   workdir: Path) -> dict:
     """Render one graphic element and return an overlay entry for render.py."""
     kind = element["type"]
     w, h = canvas
     unit = min(w, h)
-    if "at" in element and "start_in_output" not in element:
-        start = output_time(edl, element["at"], rate)
-    else:
-        start = float(element["start_in_output"])
+    start = graphic_start(element, edl, tokens, rate)
     duration = float(element["duration"])
     anim = element.get("animation") or DEFAULT_ANIMATION[kind]
     key = _digest(element, {k: v for k, v in tokens.kit.items() if k != "_dir"}, canvas, rate)
@@ -766,6 +797,8 @@ def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str
             print("  graphic logo skipped: the brand kit has no logo file (brand-neutral edit)")
             continue
         entry = build_element(element, edl, tokens, canvas, rate, workdir)
+        if "at" in element and "start_in_output" not in element:
+            entry["word_time"] = output_time(edl, element["at"], rate)  # when the words are spoken
         entry["text"] = element.get("covers") or element.get("text") or element.get("title") or ""
         if not element.get("behind_subject"):  # behind the person, the person itself keeps the face clear
             entry = clear_of_faces(entry, faces or [], canvas, top + behind)

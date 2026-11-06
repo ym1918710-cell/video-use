@@ -114,6 +114,10 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - `build <edl.json>` makes a new sequence their way: source cuts, the zoom on Adjustment Layers, their MOGRTs with the new words, their attributes pasted from exemplars (blend modes, entrances), SFX on lanes, and a captions track.
   - Premiere can't script native text graphics, only MOGRT text, so use a MOGRT from the project.
   - The project is never saved for the editor.
+- **`beats.py suggest <edl.json>`** finds lines that earn a beat in the transcripts, such as the **denial** ("أنا مش ممدوح", "I'm not…").
+  - Put them in `edl["beats"]` and the render adds a colour strobe behind the subject (local matte keeps them in front) and an error buzzer 0.2 s early.
+  - The beat lasts 13 frames.
+  - The colour and sound come from `brand_kit.beats.denial`.
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
 - **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.
@@ -442,6 +446,15 @@ Unless a brief says otherwise, these hold for every edit:
   - The client's signature shapes live in `brand_kit.json → text_styles`.
 - **Text behind the subject** must be bigger than the body (a huge numeral) or sit beside or above the head. Otherwise the person hides it all. Behind layers may bleed off-frame.
 - **Stock overlays** play once, around the speaker, never on the face. Use `keep_out: "subject"` as well as the matte, and render the person matte at `quality: "accurate"`.
+- **Text is readable on its word.**
+  - A graphic anchored with `at` starts early by its own animation's readable lead (pop ≈0.1 s, rise ≈0.09 s, wipe ≈0.15 s…), so the words can be read as they are spoken.
+  - Its sound lands when it appears.
+  - Opt out with `"anticipate": false`.
+- **The outro covers everything.** The outro range (`"outro": true`, or a last range with no speech) always dissolves in over the picture, never through black.
+  - If the last shot has no frames after its out point, the dissolve leans before the cut.
+  - Every graphic, caption and behind-layer ends as it starts to show.
+  - Its dissolve gets no whoosh.
+  - In Premiere it sits on the top track with an Opacity fade-in.
 - **Every visible effect has a sound**, from the material library first.
 - **No colour grade** until the user asks for one or has trained the look. Colour matching between cameras is a separate, explicit step.
 - **The outro dissolves over the last shot.** Never cut to black first.

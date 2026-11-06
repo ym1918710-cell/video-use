@@ -168,6 +168,9 @@ def validate_extras(edl: dict[str, Any], base: Path) -> list[tuple[str, str, str
     from camera import validate_motion
     out: list[tuple[str, str, str, str]] = []
     sources = edl.get("sources") or {}
+    for k, beat in enumerate(edl.get("beats") or []):
+        if not isinstance(beat, dict) or beat.get("type") != "denial" or not ("at" in beat or "start_in_output" in beat):
+            out.append(("error", "invalid_beat", 'beats need {"type": "denial", "at": {...} | "start_in_output"}.', f"beats[{k}]"))
     rules = edl.get("transitions")
     if rules is not None:
         broll = rules.get("broll") if isinstance(rules, dict) else None

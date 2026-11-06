@@ -156,10 +156,25 @@ var vu = (function () {
             var seq = activeSeq(a);
             var item = findByNode(a.nodeId);
             if (!item) return { error: "no project item " + a.nodeId };
-            var track = trackOf(seq, a.kind || "video", a.track);
+            var kind = a.kind || "video";
+            var track = trackOf(seq, kind, a.track);
+            var saved = [], v, t2;  // target only the destination (no dragged-along audio from nests / comps)
+            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(kind !== "audio" && v === a.track, true); }
+            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(kind === "audio" && t2 === a.track, true); }
             track.overwriteClip(item, a.start);
+            var n = 0;
+            for (v = 0; v < seq.videoTracks.numTracks; v++) seq.videoTracks[v].setTargeted(saved[n++], true);
+            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) seq.audioTracks[t2].setTargeted(saved[n++], true);
             var clip = clipAt(track, a.start);
             if (!clip) return { error: "placed item not found" };
+            var other = kind === "audio" ? seq.videoTracks : seq.audioTracks;
+            for (var ot = 0; ot < other.numTracks; ot++) {
+                var stray = clipAt(other[ot], a.start);
+                if (stray && stray.projectItem && stray.projectItem.nodeId === item.nodeId) {
+                    try { clip.setSelected(true, true); stray.setSelected(true, true); seq.unlinkSelection(); clip.setSelected(false, true); } catch (eu) {}
+                    stray.remove(false, false);
+                }
+            }
             if (a.duration) clip.end = seconds(a.start + a.duration);
             if (a.name) clip.name = a.name;
             return { ok: true, mgt: clip.isMGT ? clip.isMGT() : false };
@@ -275,6 +290,40 @@ var vu = (function () {
             }
             return { ok: true, copied: copied, added: added, errors: errors };
         },
+        // A fresh, independent copy of an After Effects composition (its own
+        // project item, so its Source Text is its own), named `name`. An item
+        // already carrying that name is reused, so typed text survives updates.
+        aeCopy: function (a) {
+            var bin = findBin(a.bin) || app.project.rootItem.createBin(a.bin);
+            var have = walk(bin, function (c) { return c.name === a.name ? c : null; });
+            if (have) return { ok: true, nodeId: have.nodeId, reused: true };
+            var before = {};
+            walk(app.project.rootItem, function (c) { before[c.nodeId] = true; return null; });
+            app.project.importAEComps(a.aep, [a.comp], bin);
+            var fresh = walk(bin, function (c) { return (!before[c.nodeId] && c.type !== ProjectItemType.BIN) ? c : null; });
+            if (!fresh) return { error: "AE comp import failed: " + a.comp };
+            fresh.name = a.name;
+            return { ok: true, nodeId: fresh.nodeId, reused: false };
+        },
+        // Remove every clip on a track (optionally only inside [from, to)).
+        clearTrack: function (a) {
+            var seq = activeSeq(a);
+            var track = trackOf(seq, a.kind || "video", a.track);
+            if (!track) return { ok: true, removed: 0 };
+            var n = 0;
+            for (var i = track.clips.numItems - 1; i >= 0; i--) {
+                var c = track.clips[i];
+                if ((a.from === undefined || c.end.seconds > a.from) && (a.to === undefined || c.start.seconds < a.to)) { c.remove(false, false); n++; }
+            }
+            return { ok: true, removed: n };
+        },
+        marker: function (a) {
+            var seq = activeSeq(a);
+            var m = seq.markers.createMarker(a.start);
+            m.name = a.name || ""; m.comments = a.comments || "";
+            if (a.duration) m.end = a.start + a.duration;
+            return { ok: true };
+        },
         cloneSequence: function (a) {
             var seq = seqByName(a.from);
             if (!seq) return { error: "no sequence " + a.from };
@@ -371,230 +420,6 @@ var vu = (function () {
             if (a.name) clip.name = a.name;
             return { ok: true, mgt: clip.isMGT ? clip.isMGT() : false };
         },
-        // Set MOGRT text/params on the clip at `start`.
-        mgtParams: function (a) {
-            var seq = activeSeq(a);
-            var clip = clipAt(trackOf(seq, "video", a.track), a.start);
-            if (!clip || !clip.isMGT()) return { error: "no MOGRT at " + a.start };
-            var mgt = clip.getMGTComponent(), set = [], missing = [];
-            for (var name in a.params) {
-                if (!a.params.hasOwnProperty(name)) continue;
-                var p = null;
-                for (var pi = 0; pi < mgt.properties.numItems; pi++) {
-                    var cand = mgt.properties[pi];
-                    if (cand.displayName !== name) continue;
-                    var cv = null; try { cv = cand.getValue(); } catch (e0) {}
-                    if (!p) p = cand;
-                    if (typeof cv === "string" && cv.indexOf("textEditValue") >= 0) { p = cand; break; }  // the text itself, not its group
-                }
-                if (!p) { missing.push(name); continue; }
-                var cur = p.getValue();
-                var val = a.params[name];
-                // Text params hold JSON ({"textEditValue": ...}) in recent versions.
-                if (typeof cur === "string" && cur.charAt(0) === "{" && typeof val === "string") {
-                    try { var o = eval("(" + cur + ")"); o.textEditValue = val; val = json(o); } catch (e) {}
-                }
-                p.setValue(val, true);
-                set.push(name);
-            }
-            return { ok: true, set: set, missing: missing };
-        },
-        addEffect: function (a) {
-            var seq = activeSeq(a);
-            var it = qeItem(seq, a.kind || "video", a.track, a.start);
-            if (!it) return { error: "no QE item at " + a.start };
-            var fx = (a.kind === "audio") ? qe.project.getAudioEffectByName(a.name) : qe.project.getVideoEffectByName(a.name);
-            if (!fx) return { error: "no effect " + a.name };
-            if (a.kind === "audio") it.addAudioEffect(fx); else it.addVideoEffect(fx);
-            return { ok: true };
-        },
-        // Keyframes / values on any component property of the clip at `start`.
-        setProps: function (a) {
-            var seq = activeSeq(a);
-            var clip = clipAt(trackOf(seq, a.kind || "video", a.track), a.start);
-            if (!clip) return { error: "no clip at " + a.start };
-            var comp = component(clip, a.component);
-            if (!comp) return { error: "no component " + a.component };
-            var done = [];
-            for (var name in a.props) {
-                if (!a.props.hasOwnProperty(name)) continue;
-                var p = prop(comp, name), spec = a.props[name];
-                if (!p) continue;
-                if (spec.keys) {
-                    p.setTimeVarying(true);
-                    var base = clip.inPoint.seconds;
-                    for (var i = 0; i < spec.keys.length; i++) {
-                        var k = spec.keys[i], tt = base + k.t;
-                        p.addKey(tt); p.setValueAtKey(tt, k.v, true);
-                        if (k.ease && k.ease !== "linear") { try { p.setInterpolationTypeAtKey(tt, 5, true); } catch (e) {} }
-                    }
-                } else { p.setValue(spec.value, true); }
-                done.push(name);
-            }
-            return { ok: true, set: done };
-        },
-        // Paste Attributes: every component of a clip in another sequence
-        // (effects it lacks are added first), values and keyframes, matched
-        // by component order and property index (names repeat, e.g. Blend Mode).
-        copyAttributes: function (a) {
-            var srcSeq = seqByName(a.fromSequence);
-            if (!srcSeq) return { error: "no sequence " + a.fromSequence };
-            var src = clipAt(trackOf(srcSeq, a.kind || "video", a.fromTrack), a.fromStart);
-            var seq = activeSeq(a);
-            var dst = clipAt(trackOf(seq, a.kind || "video", a.track), a.start);
-            if (!src || !dst) return { error: "clip missing (src " + !!src + ", dst " + !!dst + ")" };
-            var skip = {}; for (var si = 0; a.skip && si < a.skip.length; si++) skip[a.skip[si]] = true;
-            var copied = [], added = [];
-            for (var c = 0; c < src.components.numItems; c++) {
-                var sc = src.components[c];
-                if (skip[sc.displayName]) continue;
-                var dc = null;
-                for (var d = 0; d < dst.components.numItems; d++) if (dst.components[d].matchName === sc.matchName) { dc = dst.components[d]; break; }
-                if (!dc) {
-                    var it = qeItem(seq, a.kind || "video", a.track, a.start);
-                    var fx = it ? qe.project.getVideoEffectByName(sc.displayName) : null;
-                    if (fx) { it.addVideoEffect(fx); added.push(sc.displayName);
-                        for (var d2 = 0; d2 < dst.components.numItems; d2++) if (dst.components[d2].matchName === sc.matchName) dc = dst.components[d2]; }
-                }
-                if (!dc) continue;
-                for (var k = 0; k < sc.properties.numItems && k < dc.properties.numItems; k++) {
-                    var sp = sc.properties[k], dp = dc.properties[k];
-                    try {
-                        if (sp.isTimeVarying() && a.noKeys) {  // settings only: the value at the first key, no animation
-                            var k0 = sp.getKeys();
-                            if (dp.isTimeVarying()) dp.setTimeVarying(false);
-                            dp.setValue(k0 && k0.length ? sp.getValueAtKey(k0[0]) : sp.getValue(), true);
-                        } else if (sp.isTimeVarying()) {
-                            var keys = sp.getKeys();
-                            dp.setTimeVarying(true);
-                            for (var q2 = 0; keys && q2 < keys.length; q2++) {
-                                var tt = dst.inPoint.seconds + (keys[q2].seconds - src.inPoint.seconds);
-                                dp.addKey(tt); dp.setValueAtKey(tt, sp.getValueAtKey(keys[q2]), true);
-                            }
-                        } else {
-                            if (dp.isTimeVarying()) dp.setTimeVarying(false);
-                            dp.setValue(sp.getValue(), true);
-                        }
-                    } catch (e) {}
-                }
-                copied.push(sc.displayName);
-            }
-            return { ok: true, copied: copied, added: added };
-        },
-        cloneSequence: function (a) {
-            var seq = seqByName(a.from);
-            if (!seq) return { error: "no sequence " + a.from };
-            seq.clone();
-            var copy = seqByName(a.from + " Copy");
-            if (copy && a.name) copy.name = a.name;
-            return { ok: !!copy, name: copy ? copy.name : null };
-        },
-
-        ping: function () {
-            return { ok: true, version: app.version, project: app.project ? app.project.name : null,
-                     path: app.project ? app.project.path : null };
-        },
-        newProject: function (a) { app.newProject(a.path); return { ok: true, project: app.project.name }; },
-        openProject: function (a) { app.openDocument(a.path); return { ok: true, project: app.project.name }; },
-        save: function () { app.project.save(); return { ok: true, path: app.project.path }; },
-
-        importFiles: function (a) {
-            var bin = findBin(a.bin) || app.project.rootItem.createBin(a.bin);
-            var todo = [];
-            for (var i = 0; i < a.paths.length; i++) if (!findItem(a.paths[i])) todo.push(a.paths[i]);
-            if (todo.length) app.project.importFiles(todo, true, bin, false);
-            var missing = [];
-            for (var j = 0; j < a.paths.length; j++) if (!findItem(a.paths[j])) missing.push(a.paths[j]);
-            return { ok: missing.length === 0, imported: todo.length, missing: missing };
-        },
-
-        newSequence: function (a) {
-            var old = seqByName(a.name);
-            if (old && a.replace) app.project.deleteSequence(old);
-            else if (old) return { ok: true, existed: true, name: a.name };
-            var item = findItem(a.from);
-            if (!item) return { error: "not imported: " + a.from };
-            var bin = findBin(a.bin) || app.project.rootItem;
-            var seq = app.project.createNewSequenceFromClips(a.name, [item], bin);
-            var s = seq.getSettings();
-            s.videoFrameWidth = a.width; s.videoFrameHeight = a.height;
-            var fr = new Time(); fr.seconds = 1 / a.fps; s.videoFrameRate = fr;
-            seq.setSettings(s);
-            // createNewSequenceFromClips drops the clip in; start from an empty timeline.
-            for (var v = seq.videoTracks.numTracks - 1; v >= 0; v--) for (var k = seq.videoTracks[v].clips.numItems - 1; k >= 0; k--) seq.videoTracks[v].clips[k].remove(false, false);
-            for (var t = seq.audioTracks.numTracks - 1; t >= 0; t--) for (var m = seq.audioTracks[t].clips.numItems - 1; m >= 0; m--) seq.audioTracks[t].clips[m].remove(false, false);
-            app.project.activeSequence = seq;
-            return { ok: true, name: seq.name, video: seq.videoTracks.numTracks, audio: seq.audioTracks.numTracks };
-        },
-
-        ensureTracks: function (a) {
-            var seq = activeSeq(a);
-            app.enableQE();
-            var qs = qe.project.getActiveSequence();
-            var addV = Math.max(0, a.video - seq.videoTracks.numTracks);
-            var addA = Math.max(0, a.audio - seq.audioTracks.numTracks);
-            if (addV || addA) qs.addTracks(addV, seq.videoTracks.numTracks, addA, 1, seq.audioTracks.numTracks, 0, 0);
-            return { ok: true, video: seq.videoTracks.numTracks, audio: seq.audioTracks.numTracks };
-        },
-
-        // Place [in, out) of a file at `start` on one track. Video inserts drop
-        // the linked audio unless keepAudio: sound is laid separately.
-        place: function (a) {
-            var seq = activeSeq(a);
-            var item = findItem(a.path);
-            if (!item) return { error: "not imported: " + a.path };
-            item.setInPoint(a["in"], 4);
-            item.setOutPoint(a.out, 4);
-            var track = trackOf(seq, a.kind, a.track);
-            // Target only the destination track, as an editor does before an
-            // overwrite: video never lands on the sound and vice versa.
-            var saved = [], v, t2;
-            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(a.kind !== "audio" && v === a.track, true); }
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(a.kind === "audio" && t2 === a.track, true); }
-            track.overwriteClip(item, a.start);
-            var n = 0;
-            for (v = 0; v < seq.videoTracks.numTracks; v++) seq.videoTracks[v].setTargeted(saved[n++], true);
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) seq.audioTracks[t2].setTargeted(saved[n++], true);
-            item.clearInPoint(4); item.clearOutPoint(4);
-            var clip = clipAt(track, a.start);
-            if (!clip) return { error: "placed clip not found at " + a.start };
-            // An overwrite drags the file's other half along (audio under a
-            // picture, picture over a sound). Unlink it and drop that half.
-            var other = a.kind === "audio" ? seq.videoTracks : seq.audioTracks, removed = 0;
-            for (var ot = 0; ot < other.numTracks; ot++) {
-                var stray = clipAt(other[ot], a.start);
-                if (stray && stray.projectItem && stray.projectItem.nodeId === item.nodeId &&
-                    Math.abs(stray.end.seconds - clip.end.seconds) < 0.05 && !(a.kind !== "audio" && a.keepAudio)) {
-                    try {
-                        var sel = seq.getSelection(); for (var z = 0; sel && z < sel.length; z++) sel[z].setSelected(false, true);
-                        clip.setSelected(true, true); stray.setSelected(true, true);
-                        seq.unlinkSelection();
-                        clip.setSelected(false, true);
-                    } catch (eu) {}
-                    stray.remove(false, false); removed++;
-                }
-            }
-            if (a.kind === "audio") {
-                for (var vv = 0; vv < seq.videoTracks.numTracks; vv++) {
-                    var sv = clipAt(seq.videoTracks[vv], a.start);
-                    if (sv && sv.projectItem && sv.projectItem.nodeId === item.nodeId && a.kind === "audio" && a.track !== -1 && !a.keepVideo) {
-                        // only a stray linked video (never the picture we placed on purpose with the same file)
-                        if (Math.abs(sv.end.seconds - clip.end.seconds) < 0.02 && sv.name === item.name && a.removeStrayVideo) sv.remove(false, false);
-                    }
-                }
-            }
-            if (a.kind !== "audio" && !a.keepAudio) {
-                for (var t = 0; t < seq.audioTracks.numTracks; t++) {
-                    var stray = clipAt(seq.audioTracks[t], a.start);
-                    if (stray && stray.projectItem && stray.projectItem.nodeId === item.nodeId) stray.remove(false, false);
-                }
-            }
-            if (a.name) clip.name = a.name;
-            if (a.disabled) clip.disabled = true;
-            return { ok: true, start: clip.start.seconds, end: clip.end.seconds };
-        },
-
-        // Motion: anchor/position (normalized), rotation, and scale keyframes.
         motion: function (a) {
             var seq = activeSeq(a);
             var clip = clipAt(trackOf(seq, "video", a.track), a.start);
@@ -679,6 +504,13 @@ var vu = (function () {
         call: function (fn, args) {
             try {
                 if (!api[fn]) return json({ error: "unknown fn " + fn });
+                // Never act on whatever tab happens to be open: a named sequence is
+                // made active first (QE edits only reach the active one).
+                if (args && args.sequence && fn !== "inspect" && fn !== "copyAttributes") {
+                    var target = seqByName(args.sequence);
+                    if (!target) return json({ error: "no sequence " + args.sequence });
+                    if (!app.project.activeSequence || app.project.activeSequence.sequenceID !== target.sequenceID) app.project.activeSequence = target;
+                }
                 return json(api[fn](args || {}));
             } catch (e) {
                 return json({ error: String(e) + (e.line ? " (line " + e.line + ")" : ""), fn: fn });

@@ -741,6 +741,28 @@ def _brand_kit(edl: dict, edit_dir: Path) -> dict:
         return {}
 
 
+def outro_index(edl: dict, edit_dir: Path | None = None) -> int | None:
+    """The range that is the outro: ``"outro": true``, or a last range with no
+    speech (no transcript) that the edit transitions into."""
+    ranges = edl.get("ranges") or []
+    for i, r in enumerate(ranges):
+        if r.get("outro"):
+            return i
+    if len(ranges) < 2 or ranges[-1].get("outro") is False:
+        return None
+    last = ranges[-1]
+    if not last.get("transition"):
+        return None
+    if edit_dir is not None:
+        try:
+            from transcripts import transcript_path
+            if transcript_path(edit_dir, edl, last["source"]).exists():
+                return None
+        except Exception:
+            return None
+    return len(ranges) - 1
+
+
 def resolve_transitions(edl: dict, brand: dict | None = None) -> list[dict | None]:
     """The transition leading into each range (None = hard cut).
 
@@ -757,8 +779,17 @@ def resolve_transitions(edl: dict, brand: dict | None = None) -> list[dict | Non
     if isinstance(broll_rule, str):
         broll_rule = {"type": broll_rule}
     out: list[dict | None] = [None]
+    outro = next((i for i, r in enumerate(ranges) if r.get("outro")), None)
     for i in range(1, len(ranges)):
         own = ranges[i].get("transition")
+        if i == outro or (i == len(ranges) - 1 and isinstance(own, dict) and own.get("outro")):
+            # An outro always dissolves in over the picture, never through black.
+            spec = dict(own) if isinstance(own, dict) else {"type": own} if isinstance(own, str) else {}
+            if spec.get("type") in (None, "fade", "dip_black", "dip_white", "cut"):
+                spec["type"] = "dissolve"
+            spec.setdefault("duration_ms", spec.get("in_ms") or 660)
+            out.append(spec)
+            continue
         if own is False or own == "cut":
             out.append(None)
         elif own:
@@ -895,8 +926,11 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
     tdir.mkdir(parents=True, exist_ok=True)
     clips: list[tuple[Path, float, float]] = []
     print(f"transitions: {len(items)}")
+    oi = outro_index(edl, edit_dir)
     for i, spec in items:
         kind = spec.get("type", "dissolve")
+        if i == oi and kind in ("fade", "dip_black", "dip_white"):
+            kind = "dissolve"  # the outro dissolves in over the picture, never through black
         if kind == "fade":
             made = fade_clip(base_path, tdir / f"t{i:02d}_fade.mp4", timing[i][1], rate,
                              float(spec.get("out_ms", 0)), float(spec.get("in_ms", spec.get("duration_ms", 500))),
@@ -918,13 +952,20 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
         a_end, b_start = float(a["end"]), float(b["start"])
         want = float(spec.get("duration_ms", 400)) / 2000.0
         a_dur = probe_media_duration(a_plan["source"])
-        room = min(want, b_start, (float(a["end"]) - float(a["start"])) / 2, (float(b["end"]) - float(b["start"])) / 2,
-                   (a_dur - a_end) if a_dur is not None else want)
-        half = int(room * fps)
-        if half < 2:
+        # Window [cut - lead, cut + tail]: centred when both shots have handle
+        # media; otherwise it leans to the side that has it (a last shot with
+        # no frames after its out point dissolves *before* the cut instead of
+        # falling back to a hard cut).
+        a_tail = max(0.0, (a_dur - a_end) if a_dur is not None else want)
+        tail = min(want, a_tail, (float(b["end"]) - float(b["start"])) / 2)
+        lead_room = min(b_start, (float(a["end"]) - float(a["start"])) / 2)
+        lead = min(lead_room, 2 * want - tail)
+        tail = min(tail, 2 * want - lead) if lead >= want else tail
+        lf, tf = int(lead * fps), int(tail * fps)
+        if lf + tf < 4:
             print(f"  [{i:02d}] {kind}: not enough handle media; hard cut kept")
             continue
-        n, hd = 2 * half, half / fps
+        n, hd = lf + tf, lf / fps
         parts = []
         for side, (rng_start, plan) in (("a", (a_end - hd, a_plan)), ("b", (b_start - hd, b_plan))):
             part = tdir / f"t{i:02d}_{side}.mp4"
@@ -1449,7 +1490,7 @@ def write_render_manifest(edit_dir: Path, edl: dict, out_path: Path, base_path: 
         sfx.append({"file": str(resolve_path(item["file"], edit_dir)) if not str(item["file"]).startswith("library:") else item["file"],
                     "start_in_output": round(start, 4), "gain_db": float(item.get("gain_db", -6)),
                     "label": item.get("label") or item.get("auto") or Path(str(item["file"])).stem})
-    keep = ("file", "x", "y", "w", "h", "start_in_output", "duration", "type", "text")
+    keep = ("file", "x", "y", "w", "h", "start_in_output", "duration", "type", "text", "word_time")
     manifest = {
         "output": str(out_path), "base": str(base_path), "canvas": list(canvas), "rate": rate, "total_s": total_s,
         "audio_mix": str(audio_path), "stems": str(edit_dir / "stems"),
@@ -1720,6 +1761,13 @@ def main() -> None:
     from audio_mix import build_mix
     from graphics import output_time
     from sfx_library import auto_sfx
+    beat_behind: list[dict] = []
+    if edl.get("beats"):
+        from beats import expand
+        beat_behind, beat_sfx = expand(edl, edit_dir, canvas, rate, _brand_kit(edl, edit_dir))
+        if beat_sfx:
+            edl = dict(edl, audio=dict(edl.get("audio") or {}, sfx=list((edl.get("audio") or {}).get("sfx") or []) + beat_sfx))
+        print(f"beats: {len(edl['beats'])} (behind-subject strobes + sound)")
     extra = auto_sfx(edl, edit_dir, rate, _brand_kit(edl, edit_dir), resolve_at=lambda at: output_time(edl, at, rate))
     if extra:
         print(f"auto sfx: {len(extra)} sound(s) for effects with none — "
@@ -1735,7 +1783,8 @@ def main() -> None:
     from overlay_fx import prepared_overlay  # stock overlays keyed / recoloured / glowed on demand
     overlays = [prepared_overlay(o, edit_dir, canvas, rate) for o in (edl.get("overlays") or [])]
     behind_subject_overlays = [prepared_overlay(o, edit_dir, canvas, rate) for o in (edl.get("behind_subject_overlays") or [])]
-    mask_config = edl.get("subject_mask")
+    behind_subject_overlays += beat_behind
+    mask_config = edl.get("subject_mask") or ({"mode": "person"} if beat_behind else None)
     graphic_boxes: list[dict] = []
     faces: list[dict] = []
     if edl.get("graphics") or edl.get("captions"):
@@ -1775,6 +1824,27 @@ def main() -> None:
                                                     edit_dir / "captions_track" / "captions.mov"))
             else:
                 subs_path = ass_path
+
+    # The outro covers everything: nothing is drawn over it once it starts to show.
+    oi = outro_index(edl, edit_dir)
+    if oi is not None:
+        cut = segment_timing(edl["ranges"], rate)[oi][1]
+        shows = min([c["start_in_output"] for c in TRANSITION_CLIPS if abs(c["start_in_output"] + c["duration"] / 2 - cut) < 1.0]
+                    + [cut])
+
+        def under_outro(items: list[dict]) -> list[dict]:
+            kept = []
+            for ov in items:
+                st = float(ov.get("start_in_output", 0))
+                if st >= shows - 0.02:
+                    continue
+                if st + float(ov.get("duration", 0)) > shows:
+                    ov = dict(ov, duration=round(shows - st, 4))
+                kept.append(ov)
+            return kept
+        overlays = under_outro(overlays)
+        behind_subject_overlays = under_outro(behind_subject_overlays)
+        print(f"outro from {shows:.2f}s: overlays end before it")
 
     # 6. Composite (overlays + subtitles LAST); AAC is encoded once, here
     subject_mask = ensure_subject_mask(base_path, edit_dir, mask_config) if behind_subject_overlays else None
