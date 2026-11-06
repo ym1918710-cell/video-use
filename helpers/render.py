@@ -1443,7 +1443,12 @@ def ensure_subject_mask(base_path: Path, edit_dir: Path, config: dict | None) ->
             fps = float(Fraction(rate))
         else:
             fps = float(configured_fps)
-        mask_path = edit_dir / "masks" / f"{base_path.stem}_person.mkv"
+        # Keyed by the picture itself (and the quality): a re-cut or re-framed
+        # base must never reuse an older matte — it would sit on the wrong body.
+        import hashlib
+        stat = base_path.stat()
+        key = hashlib.sha1(f"{stat.st_size}:{int(stat.st_mtime)}:{quality}:{fps}".encode()).hexdigest()[:10]
+        mask_path = edit_dir / "masks" / f"{base_path.stem}_person_{key}.mkv"
         if not mask_path.exists():
             print(f"creating local person mask ({quality}) → {mask_path.name}")
             build_person_mask(base_path, mask_path, fps=fps, quality=quality)
