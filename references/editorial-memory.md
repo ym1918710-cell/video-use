@@ -83,4 +83,8 @@ These came from real feedback on testimonial and promo reels. Each is a craft ru
 - **Text timing:** a graphic is timed to be *readable* on its word, so start it early by its entrance's readable lead. Don't simply start it before the word, and don't start it on the word.
 - **Outros:** the outro covers everything once it shows: graphics and captions end before it. It fades in over the last shot's picture (about 0.3 s, never via black) and needs no whoosh.
 - **Text behind people** wants a hard drop shadow (no softness) so it separates from the background. Put a spoken number beside the hand that counts it.
+- **Subtitles that enter:** each cue comes in over about 10 frames, blurred, a little low and transparent, then settles. That's a soft entrance on every caption, not a hard cut. In the caption skin, set `entrance` and give the shadow in Premiere numbers (`shadow`: distance / softness / direction).
+- **Plain subtitles beside styled text:** when bubbles and big text carry the emphasis, the subtitles stay plain white with a black shadow at chest height. Use no keyword colour and no glow. Emphasis lives in one place.
+- **Build tension into the punch:** a riser across the hook, ending on the beat it sets up (the denial), makes the joke land.
+- **Logos get a soft shadow** (Premiere distance 5, softness 40) so they lift off a busy frame.
 - **Hand-finished edits are lessons:** when the editor finishes the tool's build by hand, diff it, learn each change, and reuse their finished sequences as the exemplars to copy-paste from next time.

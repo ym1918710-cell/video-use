@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -209,7 +210,25 @@ CAPTION_DEFAULTS = {
     "skip_repeats": False, # True: no caption while a text graphic / the logo shows the same words
     "max_words": 4,
     "font": None,
+    # {"distance": px@1080w, "softness": px, "direction": deg (0 = up, 135 = down-right), "opacity": 0–1}
+    # — the Premiere Drop Shadow numbers; None keeps the soft default.
+    "shadow": None,
+    # {"duration": s, "blur": px@1080w, "rise": share of height, "fade": bool}: each cue
+    # comes in blurred, a little low and transparent, settling in `duration`. None: cut in.
+    "entrance": None,
 }
+
+
+def caption_shadow(skin: dict[str, Any], size: int, width: int) -> dict[str, Any]:
+    spec = skin.get("shadow")
+    if not spec:
+        return {"color": "#00000080", "blur": round(size * 0.12), "dx": 0, "dy": round(size * 0.05)}
+    k = width / 1080
+    dist = float(spec.get("distance", 12)) * k
+    angle = math.radians(float(spec.get("direction", 135)))
+    alpha = round(max(0.0, min(1.0, float(spec.get("opacity", 1.0)))) * 255)
+    return {"color": f"{spec.get('color', '#000000')[:7]}{alpha:02X}", "blur": round(float(spec.get("softness", 35)) * 0.4 * k),
+            "dx": round(dist * math.sin(angle)), "dy": round(-dist * math.cos(angle))}
 
 
 def ass_color(hex_color: str, alpha: float = 1.0) -> str:
@@ -507,7 +526,7 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
     """Render captions as one alpha MOV with CoreText (correct Arabic bidi with highlight)."""
     import hashlib
     from fractions import Fraction
-    from PIL import Image
+    from PIL import Image, ImageFilter
     from graphics import encode_alpha_mov, rasterize_cards
     skin = caption_skin(edl, edit_dir)
     w, h = canvas
@@ -550,18 +569,20 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
                 alpha = round(max(0.0, min(1.0, float(skin["box_opacity"]))) * 255)
                 card["fill"] = {"colors": [f"{skin['box_color'][:7]}{alpha:02X}"]}
             else:
-                card["textStroke"] = {"color": skin["outline_color"], "blur": -4, "dx": 0, "dy": 0}
-                card["shadow"] = {"color": "#00000080", "blur": round(size * 0.12), "dx": 0, "dy": round(size * 0.05)}
+                if skin.get("outline_color"):
+                    card["textStroke"] = {"color": skin["outline_color"], "blur": -4, "dx": 0, "dy": 0}
+                card["shadow"] = caption_shadow(skin, size, w)
                 if skin.get("glow"):  # a soft coloured halo, e.g. a brand blue
                     card["glow"] = {"color": skin["glow"], "blur": round(size * 0.35), "dx": 0, "dy": 0}
             key = hashlib.sha1(json.dumps(card, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
             card["file"] = str(work / f"cap_{key}.png")
-            states.append((k_start, k_end, margin, card))
+            states.append((k_start, k_end, margin, start, card))
     rasterize_cards([c for *_x, c in states], work)
     images: dict[str, Image.Image] = {}
     fps = float(Fraction(rate))
     frames_total = max(1, round(total * fps))
-    cache: dict[tuple[str, int] | None, bytes] = {}
+    cache: dict[tuple[str, int, float] | None, bytes] = {}
+    entrance = skin.get("entrance")
 
     def frames():
         index = 0
@@ -570,15 +591,28 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
             while index < len(states) and states[index][1] <= t:
                 index += 1
             active = states[index] if index < len(states) and states[index][0] <= t else None
-            key = (active[3]["file"], active[2]) if active else None
+            # Entrance: progress 0→1 over the first `duration` of each cue.
+            settle = 1.0
+            if active and entrance:
+                settle = min(1.0, max(0.0, (t - active[3]) / max(1e-3, float(entrance.get("duration", 0.333)))))
+                settle = 1 - (1 - settle) ** 2
+            key = (active[-1]["file"], active[2], round(settle, 3)) if active else None
             if key not in cache:
                 canvas_img = Image.new("RGBA", canvas, (0, 0, 0, 0))
                 if active:
-                    path = active[3]["file"]
+                    path = active[-1]["file"]
                     img = images.setdefault(path, Image.open(path).convert("RGBA"))
                     x = (w - img.width) // 2
                     y = h - active[2] - img.height
+                    if settle < 1.0:
+                        y += round(float(entrance.get("rise", 0.036)) * h * (1 - settle))
+                        if entrance.get("fade", True):
+                            img = img.copy()
+                            img.putalpha(img.getchannel("A").point(lambda v, f=settle: round(v * f)))
                     canvas_img.alpha_composite(img, (max(0, x), max(0, y)))
+                    blur = float(entrance.get("blur", 0) if entrance else 0) * (w / 1080) * (1 - settle) * 0.5
+                    if blur >= 0.5:
+                        canvas_img = canvas_img.filter(ImageFilter.GaussianBlur(blur))
                 if len(cache) > 64:
                     cache.clear()
                 cache[key] = canvas_img.tobytes()

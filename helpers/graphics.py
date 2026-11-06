@@ -299,6 +299,14 @@ def rasterize_cards(cards: list[dict], workdir: Path) -> None:
 
 # ---------------------------------------------------------------- motion
 
+def premiere_shadow(spec: dict) -> dict:
+    """Premiere Drop Shadow settings (distance / softness in px at 1080 wide,
+    opacity 0–1 or 0–255) → add_drop_shadow's ratios."""
+    opacity = float(spec.get("opacity", 1.0))
+    return {"color": spec.get("color", "#000000"), "opacity": opacity / 255 if opacity > 1 else opacity,
+            "blur_ratio": float(spec.get("softness", 40)) * 0.4 / 1080, "offset_ratio": float(spec.get("distance", 5)) / 1080}
+
+
 def add_drop_shadow(image: Image.Image, shadow: dict | None, unit: float, angle_deg: float = 90.0) -> Image.Image:
     """A soft drop shadow cast from the card's own alpha, so text and pills
     read on any picture. Grows the canvas to fit the blur and offset."""
@@ -653,6 +661,12 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
         opacity = float(element.get("opacity", tokens.logo.get("opacity", 1.0)))
         if opacity < 1:
             image.putalpha(image.getchannel("A").point(lambda v: round(v * opacity)))
+        # A logo can carry its own Drop Shadow, in Premiere's numbers
+        # (brand kit logo.shadow = {"distance": 5, "softness": 40, "direction": 135, "opacity": 1}).
+        logo_shadow = element.get("shadow", tokens.logo.get("shadow"))
+        if isinstance(logo_shadow, dict):
+            image = add_drop_shadow(image, premiere_shadow(logo_shadow), unit,
+                                    float(logo_shadow.get("direction", 135)) - 90)
         position = element.get("position") or tokens.logo.get("placement") or DEFAULT_POSITION["logo"]
     elif element.get("text_style"):
         from text_styles import render_styled, resolve_style

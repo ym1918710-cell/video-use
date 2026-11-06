@@ -16,6 +16,9 @@ Find candidates from the transcripts::
 
 Colour and sound come from the brand kit (``beats.denial.color`` /
 ``beats.denial.sfx``), else red and the material library's "error" sounds.
+A riser (``beats.denial.riser_sfx``, else the library's "riser" role; off with
+``"riser": false``) builds into the last beat of a run and ends as the buzzer
+starts.
 """
 
 from __future__ import annotations
@@ -122,12 +125,34 @@ def expand(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str, brand:
             sound = picks[0]["file"] if picks else None
         except Exception:
             sound = None
+    riser = cfg.get("riser_sfx")
+    if cfg.get("riser", True) and not riser:
+        try:
+            from sfx_library import library_choices
+            picks = library_choices("riser")
+            riser = picks[0]["file"] if picks else None
+        except Exception:
+            riser = None
+    riser_s = float(cfg.get("riser_s", 4.5))
     folder = edit_dir / "beats"
     folder.mkdir(exist_ok=True)
-    for k, beat in enumerate(edl.get("beats") or []):
-        if beat.get("type") != "denial":
-            continue
-        start = output_time(edl, beat["at"], rate) if "at" in beat else float(beat["start_in_output"])
+    denials = [b for b in edl.get("beats") or [] if b.get("type") == "denial"]
+    starts = [output_time(edl, b["at"], rate) if "at" in b else float(b["start_in_output"]) for b in denials]
+    for k, beat in enumerate(denials):
+        start = starts[k]
+        # One riser builds into the last beat of a run ("أنا مش ممدوح … وأنا مش
+        # data analyst"): it ends where the buzzer starts, at most riser_s long.
+        if riser and not any(0 < s2 - start <= riser_s for s2 in starts):
+            end = max(0.0, start - float(cfg.get("sfx_lead", 0.2)))
+            try:
+                file_len = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                                 str(riser)], capture_output=True, text=True).stdout.strip() or 0)
+            except Exception:
+                file_len = 0.0
+            length = min(riser_s, end, file_len or riser_s)
+            if length > 0.5:
+                sfx.append({"file": riser, "start_in_output": round(end - length, 4), "in": round(max(0.0, (file_len or length) - length), 4),
+                            "gain_db": float(cfg.get("riser_gain_db", -8)), "label": "riser → denial"})
         dur = float(beat.get("duration", 0.43))
         clip = strobe_clip(folder / f"denial_{color.lstrip('#')}_{round(dur * 1000)}.mov", canvas, rate, color, dur,
                            float(cfg.get("opacity", 0.75)))

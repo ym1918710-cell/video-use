@@ -532,3 +532,49 @@ class FinishingLessonTests(unittest.TestCase):
         self.assertGreater(lead, 0)
         self.assertAlmostEqual(graphic_start(g, edl, tok, "30/1"), 4.0 - lead, places=3)
         self.assertEqual(graphic_start(dict(g, anticipate=False), edl, tok, "30/1"), 4.0)
+
+
+class FinalReelLessonTests(unittest.TestCase):
+    """What the editor changed by hand in his delivered vid 7."""
+
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_caption_shadow_uses_premiere_numbers(self):
+        from build_captions import caption_shadow
+        got = caption_shadow({"shadow": {"distance": 12, "softness": 35, "direction": 135, "opacity": 1}}, 60, 1080)
+        self.assertEqual(got, {"color": "#000000FF", "blur": 14, "dx": 8, "dy": 8})
+        self.assertEqual(caption_shadow({}, 60, 1080)["dx"], 0)  # default stays the soft drop
+
+    def test_logo_shadow_from_premiere_settings(self):
+        from graphics import premiere_shadow
+        got = premiere_shadow({"distance": 5, "softness": 40, "opacity": 255})
+        self.assertAlmostEqual(got["opacity"], 1.0)
+        self.assertAlmostEqual(got["offset_ratio"], 5 / 1080)
+
+    def test_riser_builds_into_the_last_denial_of_a_run(self):
+        from beats import expand
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            riser = tmp / "riser.wav"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "4.5", str(riser)], check=True)
+            edl = {"beats": [{"type": "denial", "start_in_output": 5.6}, {"type": "denial", "start_in_output": 7.27}]}
+            brand = {"beats": {"denial": {"sfx": str(riser), "riser_sfx": str(riser)}}}
+            behind, sfx = expand(edl, tmp, (16, 16), "30/1", brand)
+            risers = [s for s in sfx if s["label"].startswith("riser")]
+            self.assertEqual(len(behind), 2)
+            self.assertEqual(len(risers), 1)  # one riser, into the second beat only
+            self.assertAlmostEqual(risers[0]["start_in_output"] + 4.5, 7.07, places=2)
+            self.assertAlmostEqual(risers[0]["in"], 0.0)
+
+    def test_learn_finds_the_subtitle_track(self):
+        from premiere import learn_from
+        clip = lambda k: {"start": k * 0.5, "end": k * 0.5 + 0.5, "inPoint": 3600.0, "name": "Graphic", "mgt": True, "item": {},
+                          "components": [{"name": "Text", "props": []},
+                                         {"name": "Gaussian Blur (Legacy)", "props": [{"name": "Blurriness", "keys": [{"t": 3600.0, "v": 15}, {"t": 3600.333, "v": 0}]}]},
+                                         {"name": "Drop Shadow", "props": [{"name": "Distance", "value": 12}, {"name": "Softness", "value": 35}]}]}
+        seq = {"name": "vid 7", "video": [{"index": 12, "clips": [clip(k) for k in range(10)]}], "audio": []}
+        house = learn_from(seq)
+        self.assertEqual(house["captions"]["track"], 12)
+        self.assertEqual(house["captions"]["skip"], ["Text"])
+        self.assertEqual(house["captions"]["shadow"], {"Distance": 12, "Softness": 35})

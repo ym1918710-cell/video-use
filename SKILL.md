@@ -113,11 +113,14 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - `learn "<sequence>" --edit <edit/>` reads an editor's own sequence into the brand kit's `premiere_house`: how they zoom (Adjustment Layer + Transform, peak, ramp, lift), their text entrance and shadow, their MOGRTs and text fields, their light-leak graphic, and their favourite SFX by role.
   - `build <edl.json>` makes a new sequence their way: source cuts, the zoom on Adjustment Layers, their MOGRTs with the new words, their attributes pasted from exemplars (blend modes, entrances), SFX on lanes, and a captions track.
   - Premiere can't script native text graphics, only MOGRT text, so use a MOGRT from the project.
+  - Subtitles: `build` imports the SRT as a caption track. The editor runs Graphics → Upgrade Caption to Graphic, then `build --only caption_fx` pastes the learned subtitle clip (`premiere_house.captions`: entrance, shadow, Motion position) onto every one, skipping Text so each keeps its words.
+  - Zoom: Transform with Uniform Scale on, keys on Scale.
   - The project is never saved for the editor.
 - **`beats.py suggest <edl.json>`** finds lines that earn a beat in the transcripts, such as the **denial** ("أنا مش ممدوح", "I'm not…").
   - Put them in `edl["beats"]` and the render adds a colour strobe behind the subject (local matte keeps them in front) and an error buzzer 0.2 s early.
   - The beat lasts 13 frames.
   - The colour and sound come from `brand_kit.beats.denial`.
+  - A riser builds into the last beat of a run and ends as the buzzer starts (`riser_sfx`, else the library's riser role; `"riser": false` turns it off).
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
 - **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.

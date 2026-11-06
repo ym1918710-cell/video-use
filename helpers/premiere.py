@@ -286,6 +286,14 @@ def learn_from(seq: dict) -> dict:
         group["typical_duration"] = d[len(d) // 2] if d else None
         group["uses"] = len(d)
     house["text_tracks"] = sorted(text_tracks.values(), key=lambda t: -t["uses"])
+    # Subtitles: a track of many short native text graphics (his method: the
+    # SRT as a caption track → Upgrade to Graphic → paste one clip's attributes
+    # — entrance, shadow, Motion position — onto all, keeping each one's text).
+    subs = [t for t in text_tracks.values() if t["uses"] >= 8]
+    if subs:
+        t = max(subs, key=lambda t: t["uses"])
+        house["captions"] = {"track": t["track"], "exemplar": t["exemplar"], "entrance": t.get("entrance"),
+                             "shadow": t.get("shadow"), "skip": ["Text"], "uses": t["uses"]}
     house["mogrts"] = templates
     leak = next(((n, t) for n, t in templates.items() if "light leak" in n.lower() or "leak" in n.lower()), None)
     if leak:
@@ -370,7 +378,7 @@ def favourite_sfx_map(house: dict) -> dict[str, str]:
                 break
     return out
 
-SECTIONS = ("picture", "zoom", "light", "behind", "graphics", "sfx", "captions")
+SECTIONS = ("picture", "zoom", "light", "behind", "graphics", "sfx", "captions", "caption_fx")
 
 
 def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set[str] | None = None) -> dict:
@@ -598,11 +606,18 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
                 else:
                     bridge("addEffect", track=adj_track, start=start, name=zoom_house.get("effect") or "Transform")
                 zkeys = [{"t": kk["t"], "v": round(kk["scale"] / cover * 100, 3), "ease": kk.get("ease")} for kk in keys]
-                props = {"Uniform Scale": {"value": True}, "Scale Height": {"keys": zkeys}, "Scale Width": {"keys": zkeys}}
+                fx_name = zoom_house.get("effect") or "Transform"
+                # Uniform Scale on first: Premiere then shows one "Scale" that
+                # grows height and width together; key that one.
+                bridge("setProps", track=adj_track, start=start, component=fx_name, props={"Uniform Scale": {"value": True}})
+                props = {"Scale": {"keys": zkeys}}
                 if face:  # pivot on the face: it stays put while the frame grows around it
                     props["Anchor Point"] = {"value": [face[0], face[1]]}
                     props["Position"] = {"value": [face[0], face[1]]}
-                bridge("setProps", track=adj_track, start=start, component=zoom_house.get("effect") or "Transform", props=props)
+                done = bridge("setProps", track=adj_track, start=start, component=fx_name, props=props).get("set") or []
+                if not bridge.dry and "Scale" not in done:  # older Transform: both axes by name
+                    bridge("setProps", track=adj_track, start=start, component=fx_name,
+                           props={"Scale Height": {"keys": zkeys}, "Scale Width": {"keys": zkeys}})
         elif want("picture") or want("zoom"):
             bridge("motion", **motion)
 
@@ -725,6 +740,21 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         bridge("volume", track=1 + lane, start=start, db=float(s["gain_db"]))
     if edl.get("captions") and (not only or "captions" in only):
         bridge("captions", srt=str(srt), start=0.0)
+    cap_house = (brand.get("premiere_house") or {}).get("captions") or {}
+    if cap_house.get("exemplar") and (not only or "caption_fx" in only) and not bridge.dry:
+        # After the editor upgrades the caption track to graphics, paste his
+        # subtitle look onto every one (skipping Text, so each keeps its words).
+        ex = cap_house["exemplar"]
+        seq_now = bridge("inspect", props=False)
+        tracks = [t for t in seq_now.get("video") or [] if sum(1 for c in t["clips"] if c["name"] == "Graphic") >= 3]
+        if tracks:
+            track = max(tracks, key=lambda t: len(t["clips"]))
+            for c in track["clips"]:
+                if c["name"] == "Graphic" and not (ex["sequence"] == title and ex["track"] == track["index"] and abs(ex["start"] - c["start"]) < 1e-3):
+                    bridge("copyAttributes", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"],
+                           track=track["index"], start=c["start"], skip=cap_house.get("skip") or ["Text"])
+        elif only and "caption_fx" in only:
+            print("caption_fx: no subtitle graphics yet — select the caption track, Graphics → Upgrade Caption to Graphic, then rerun")
     # The project is left unsaved: the editor reviews the new sequence, then saves.
     return {"sequence": title, "calls": len(bridge.log), "graphics": len(graphics), "sfx": len(sfx),
             "mogrt": sum(1 for g in graphics if "mogrt" in g)}

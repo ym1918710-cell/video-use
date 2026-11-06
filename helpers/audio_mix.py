@@ -198,7 +198,9 @@ def render_sfx(items: list[dict], total: float, base: Path, out: Path, at_resolv
     for index, item in enumerate(items):
         start = float(item["start_in_output"]) if "start_in_output" in item else at_resolver(item["at"])
         inputs += ["-i", str(_resolve(item["file"], base))]
-        graph.append(f"[{index}:a]aresample={AUDIO_RATE},aformat=sample_fmts=flt:channel_layouts=stereo,"
+        trim = float(item.get("in", 0) or 0)  # seconds into the file (e.g. the tail of a riser)
+        cut = f"atrim=start={trim:.4f},asetpts=PTS-STARTPTS," if trim > 0 else ""
+        graph.append(f"[{index}:a]{cut}aresample={AUDIO_RATE},aformat=sample_fmts=flt:channel_layouts=stereo,"
                      f"volume={float(item.get('gain_db', -6)):.2f}dB,"
                      f"adelay=delays={int(round(start * AUDIO_RATE))}S:all=1[s{index}]")
     labels = "".join(f"[s{i}]" for i in range(len(items)))
