@@ -160,6 +160,24 @@ def _cutout(base: Path, mask: Path, start: float, duration: float, out: Path, ra
     return out
 
 
+def write_srt(edl: dict, base_dir: Path, out: Path) -> Path:
+    """The edit's captions as SRT (same cues and cleaning as the burned-in ones)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from build_captions import caption_cues, caption_skin, clean_word
+
+    skin = caption_skin(edl, base_dir)
+
+    def stamp(t: float) -> str:
+        ms = round(t * 1000)
+        return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+
+    rows = [f"{k}\n{stamp(a)} --> {stamp(b)}\n{' '.join(clean_word(t, skin) for _x, _y, t in w)}\n"
+            for k, (a, b, w) in enumerate(caption_cues(edl, base_dir, int(skin["max_words"])), start=1)]
+    out.write_text("\n".join(rows), encoding="utf-8")
+    return out
+
+
 class _Xml:
     def __init__(self, rate: str, canvas: tuple[int, int]):
         self.base, ntsc = timebase(rate)
@@ -270,18 +288,8 @@ def premiere_export(edl: dict, edl_path: Path, out_dir: Path, title: str) -> Pat
         a_sfx.append(x.clip(path, float(item["start_in_output"]), dur, audio=True, gain_db=float(item["gain_db"]),
                             name=f"sfx {item['label']}"))
 
-    srt = out_dir / f"{title}.srt"
     try:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from build_captions import caption_cues, caption_skin, clean_word
-        skin = caption_skin(edl, base_dir)
-        def stamp(t: float) -> str:
-            ms = round(t * 1000)
-            return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
-        rows = [f"{k}\n{stamp(a)} --> {stamp(b)}\n{' '.join(clean_word(t, skin) for _x, _y, t in w)}\n"
-                for k, (a, b, w) in enumerate(caption_cues(edl, base_dir, int(skin["max_words"])), start=1)]
-        srt.write_text("\n".join(rows), encoding="utf-8")
+        write_srt(edl, base_dir, out_dir / f"{title}.srt")
     except Exception as exc:
         print(f"  (no SRT: {exc})")
 

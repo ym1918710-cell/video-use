@@ -109,6 +109,11 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
 - **`compare_takes.py --edit-dir <dir>`** — ranks repeated lines across takes.
 - **`camera.py`** — keyframed zoom / pan / face-track maths (`zoom`, `camera`, `track` on a range); called by `render.py`.
 - **`multicam.py sync|switch <edl.json>`** — angle sync by audio; cuts to the speaker's angle.
+- **`premiere.py install|ping|sequences|learn|build`** drives Premiere Pro through the Video Use Bridge panel (`premiere/video-use-bridge`, local only on 127.0.0.1:7788).
+  - `learn "<sequence>" --edit <edit/>` reads an editor's own sequence into the brand kit's `premiere_house`: how they zoom (Adjustment Layer + Transform, peak, ramp, lift), their text entrance and shadow, their MOGRTs and text fields, their light-leak graphic, and their favourite SFX by role.
+  - `build <edl.json>` makes a new sequence their way: source cuts, the zoom on Adjustment Layers, their MOGRTs with the new words, their attributes pasted from exemplars (blend modes, entrances), SFX on lanes, and a captions track.
+  - Premiere can't script native text graphics, only MOGRT text, so use a MOGRT from the project.
+  - The project is never saved for the editor.
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
 - **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.
