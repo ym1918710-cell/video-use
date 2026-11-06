@@ -1693,8 +1693,9 @@ def main() -> None:
         audio_filter = loudnorm_filter(audio_path, one_pass=args.draft)
 
     # 4. Brand-driven graphics → ordinary overlay entries
-    overlays = list(edl.get("overlays") or [])
-    behind_subject_overlays = list(edl.get("behind_subject_overlays") or [])
+    from overlay_fx import prepared_overlay  # stock overlays keyed / recoloured / glowed on demand
+    overlays = [prepared_overlay(o, edit_dir, canvas, rate) for o in (edl.get("overlays") or [])]
+    behind_subject_overlays = [prepared_overlay(o, edit_dir, canvas, rate) for o in (edl.get("behind_subject_overlays") or [])]
     mask_config = edl.get("subject_mask")
     graphic_boxes: list[dict] = []
     faces: list[dict] = []
@@ -1709,7 +1710,8 @@ def main() -> None:
     if edl.get("graphics"):
         from graphics import build_graphics
         print("graphics (brand kit tokens)")
-        graphic_top, graphic_behind = build_graphics(edl, edit_dir, canvas, rate, faces)
+        from build_captions import make_room_for_captions
+        graphic_top, graphic_behind = build_graphics(make_room_for_captions(edl, edit_dir, rate), edit_dir, canvas, rate, faces)
         overlays += graphic_top
         behind_subject_overlays += graphic_behind
         graphic_boxes = graphic_top + graphic_behind

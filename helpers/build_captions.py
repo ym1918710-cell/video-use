@@ -205,6 +205,8 @@ CAPTION_DEFAULTS = {
     "keywords": [],
     "glow": None,          # "#HEX[AA]": soft coloured halo around the text
     "strip_punctuation": False,  # True: no . , ، ؟ ! … on screen
+    "fixed": False,        # True: always at `position`, never moved around graphics
+    "skip_repeats": False, # True: no caption while a text graphic / the logo shows the same words
     "max_words": 4,
     "font": None,
 }
@@ -231,6 +233,9 @@ def caption_skin(edl: dict[str, Any], edit_dir: Path) -> dict[str, Any]:
     fonts = kit.get("fonts") or {}
     if not skin.get("font"):
         skin["font"] = fonts.get("caption") or fonts.get("arabic") or fonts.get("body") or "Geeza Pro"
+    if skin["font"] and not str(skin["font"]).lower().endswith((".ttf", ".otf", ".ttc")):
+        from graphics import resolve_font_name
+        skin["font"] = resolve_font_name(str(skin["font"]))
     overrides = edl.get("captions")
     if isinstance(overrides, dict):
         skin.update({k: v for k, v in overrides.items() if k != "enabled" and v is not None})
@@ -298,6 +303,64 @@ def _overlaps(a0: float, a1: float, b0: float, b1: float) -> bool:
     return a0 < b1 and b0 < a1
 
 
+def _norm(word: str) -> str:
+    return word.strip(PUNCTUATION).replace("ـ", "").replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").lower()
+
+
+def repeats_graphic(words: list, cue: tuple[float, float], boxes: list[dict]) -> bool:
+    """True when an on-screen text graphic (or the logo) already says this cue.
+
+    Captions would only repeat it, so the cue is dropped. A graphic "says" a
+    cue when they overlap in time and share a word; the logo covers the
+    brand-name words its entry lists in ``text`` (or any cue under it when it
+    lists none).
+    """
+    cue_words = {_norm(t) for _a, _b, t in words if len(_norm(t)) > 1}
+    for b in boxes:
+        if b.get("type") in (None, "face", "end_card"):
+            continue
+        if not _overlaps(cue[0], cue[1], float(b["start_in_output"]), float(b["start_in_output"]) + float(b["duration"])):
+            continue
+        said = {_norm(t) for t in str(b.get("text") or "").split() if len(_norm(t)) > 1}
+        if (b.get("type") == "logo" and not said) or cue_words & said:
+            return True
+    return False
+
+
+def make_room_for_captions(edl: dict[str, Any], edit_dir: Path, rate: str) -> dict[str, Any]:
+    """With fixed captions, a text graphic in the caption area leaves when the
+    next caption it doesn't already say begins — the two never overlap.
+
+    Only graphics near the caption spot are trimmed (top headlines and items
+    behind the subject keep their time). Returns a copy of the EDL.
+    """
+    skin = caption_skin(edl, edit_dir)
+    if not skin.get("fixed") or not edl.get("captions"):
+        return edl
+    from graphics import NAMED_POSITIONS, output_time
+    cues = [(a, b, [(x, y, clean_word(t, skin)) for x, y, t in w]) for a, b, w in caption_cues(edl, edit_dir, int(skin["max_words"]))]
+    spot = float(skin["position"])
+    graphics = []
+    for g in edl.get("graphics") or []:
+        g = dict(g)
+        if g.get("behind_subject") or g.get("type") == "end_card" or g.get("keep_with_captions"):
+            graphics.append(g)
+            continue
+        pos = g.get("position")
+        y = float(pos.get("y", 0.5)) if isinstance(pos, dict) else NAMED_POSITIONS.get(str(pos), (0.5, 0.5))[1]
+        start = output_time(edl, g["at"], rate) if "at" in g and "start_in_output" not in g else float(g.get("start_in_output", 0))
+        end = start + float(g["duration"])
+        if abs(y - spot) <= 0.2:
+            box = {"type": g.get("type"), "start_in_output": start, "duration": end - start,
+                   "text": g.get("covers") or g.get("text") or g.get("title") or ""}
+            for a, b, words in cues:
+                if start + 0.3 < a < end and not repeats_graphic(words, (a, b), [box]):
+                    g["duration"] = round(max(0.6, a - start), 3)
+                    break
+        graphics.append(g)
+    return dict(edl, graphics=graphics)
+
+
 def caption_margin(canvas: tuple[int, int], skin: dict, cue: tuple[float, float], boxes: list[dict]) -> int | None:
     """MarginV for this cue, moved clear of any graphic in the caption band.
 
@@ -312,6 +375,8 @@ def caption_margin(canvas: tuple[int, int], skin: dict, cue: tuple[float, float]
                                             float(b["start_in_output"]) + float(b["duration"]))]
     if any(b.get("type") == "end_card" for b in active):
         return None
+    if skin.get("fixed"):  # one steady spot: the eye always knows where to read
+        return max(0, round(h - bottom))
     bands = [(float(b["y"]), float(b["y"]) + float(b.get("h", 0))) for b in active]
 
     def blocked(t: float) -> bool:
@@ -364,6 +429,8 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     events: list[str] = []
     for start, end, words in caption_cues(edl, edit_dir, int(skin["max_words"])):
         words = [(a, b, clean_word(t, skin)) for a, b, t in words]
+        if skin.get("skip_repeats") and repeats_graphic(words, (start, end), boxes or []):
+            continue
         margin = caption_margin(canvas, skin, (start, end), boxes or [])
         if margin is None:
             continue
@@ -451,6 +518,8 @@ def build_caption_track(edl: dict[str, Any], edit_dir: Path, canvas: tuple[int, 
     states: list[tuple[float, float, int, dict]] = []  # (start, end, margin, card)
     for start, end, words in caption_cues(edl, edit_dir, int(skin["max_words"])):
         words = [(a, b, clean_word(t, skin)) for a, b, t in words]
+        if skin.get("skip_repeats") and repeats_graphic(words, (start, end), boxes or []):
+            continue
         margin = caption_margin(canvas, skin, (start, end), boxes)
         if margin is None:
             continue

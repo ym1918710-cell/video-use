@@ -90,6 +90,16 @@ def with_alpha(hex_color: str, alpha: float) -> str:
     return f"{hex_color[:7]}{round(max(0, min(1, alpha)) * 255):02X}"
 
 
+def resolve_font_name(value: str) -> str:
+    """A family/full name ("Cairo Black") → the file in the user's material
+    folder when it is there; otherwise the name, for the system to resolve."""
+    try:
+        from material import find_font
+        return find_font(value) or value
+    except Exception:
+        return value
+
+
 class Tokens:
     """Brand tokens with explicit brand-neutral fallbacks."""
 
@@ -124,7 +134,9 @@ class Tokens:
         candidate = Path(value).expanduser()
         if not candidate.is_absolute() and (self.base / candidate).exists():
             candidate = self.base / candidate
-        return str(candidate) if candidate.suffix.lower() in {".ttf", ".otf", ".ttc"} else value
+        if candidate.suffix.lower() in {".ttf", ".otf", ".ttc"}:
+            return str(candidate)
+        return resolve_font_name(value)
 
     def font_for(self, text: str, headline: bool = True) -> str | None:
         if self.arabic_font and any("֐" <= ch <= "ࣿ" for ch in text):
@@ -754,6 +766,7 @@ def build_graphics(edl: dict, edit_dir: Path, canvas: tuple[int, int], rate: str
             print("  graphic logo skipped: the brand kit has no logo file (brand-neutral edit)")
             continue
         entry = build_element(element, edl, tokens, canvas, rate, workdir)
+        entry["text"] = element.get("covers") or element.get("text") or element.get("title") or ""
         if not element.get("behind_subject"):  # behind the person, the person itself keeps the face clear
             entry = clear_of_faces(entry, faces or [], canvas, top + behind)
         print(f"  graphic {element['type']:<11} @ {entry['start_in_output']:.2f}s → {Path(entry['file']).name}")

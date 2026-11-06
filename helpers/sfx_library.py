@@ -51,6 +51,15 @@ def classify(name: str) -> str | None:
     return None
 
 
+def _library_items() -> list[dict[str, Any]]:
+    try:
+        sys_path_helpers()
+        from library import load
+        return list(load().get("items", {}).values())
+    except Exception:
+        return []
+
+
 def library_choices(role: str) -> list[dict[str, Any]]:
     """Library SFX for a role, shortest first, wav preferred over its mp3 twin."""
     try:
@@ -169,7 +178,7 @@ def effect_events(edl: dict, rate: str, brand: dict | None = None) -> list[dict[
         except Exception:
             continue
         anim = g.get("animation") or DEFAULT_ANIMATION[g["type"]]
-        sound = "riser" if g["type"] == "end_card" else ANIMATION_SOUND.get(anim, "pop")
+        sound = {"end_card": "riser", "logo": "shimmer"}.get(g["type"]) or ANIMATION_SOUND.get(anim, "pop")
         events.append({"time": start, "kind": f"graphic:{g['type']}", "sound": sound, "opt": g.get("sfx"),
                        "label": str(g.get("text") or g.get("title") or g["type"])[:30],
                        "words": len(str(g.get("text") or "").split()) if anim in ("typewriter", "words") else 0,
@@ -226,11 +235,17 @@ def auto_sfx(edl: dict, edit_dir: Path, rate: str, brand: dict | None = None,
         opt = event.get("opt")
         if opt is False or event["sound"] is None and not isinstance(opt, str):
             continue
-        sound = opt if isinstance(opt, str) else event["sound"]
+        chosen_file = opt if isinstance(opt, str) and Path(opt).suffix else None  # an element may name its own file
+        sound = event["sound"] if chosen_file or not isinstance(opt, str) else opt
         if any(abs(t - event["time"]) < 0.15 for t in taken):
             continue
-        source = mapping.get(sound) or mapping.get(event["kind"].split(":")[-1])
+        source = chosen_file or mapping.get(sound) or mapping.get(event["kind"].split(":")[-1])
         gain, lead = GAIN.get(sound, -16), LEAD.get(sound, 0.0)
+        if chosen_file:
+            known = [i for i in _library_items() if i.get("file") == str(Path(chosen_file).resolve())]
+            if known and known[0].get("lufs") is not None:
+                gain = ROLE_LUFS.get(sound, -28) - float(known[0]["lufs"])
+            lead = 0.0
         if not source and audio.get("sfx_library", True):
             # The user's own library first, rotating so repeats don't sound canned.
             choices = library_choices(sound) or (library_choices("whoosh") if sound in ("zoom", "swoosh") else [])

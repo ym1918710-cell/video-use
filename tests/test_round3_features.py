@@ -445,3 +445,47 @@ class ClientTextStyleTests(unittest.TestCase):
         self.assertEqual(classify("Mountain Audio - Stamp - Sound (1)"), "impact")
         self.assertEqual(classify("shine-1-268902"), "shimmer")
         self.assertIsNone(classify("Samurai Sword 03"))
+
+
+class FixedCaptionTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_repeats_graphic_matches_words_and_logo(self):
+        from build_captions import repeats_graphic
+        words = [(1.0, 1.3, "أنا"), (1.3, 1.6, "محمد")]
+        self.assertTrue(repeats_graphic(words, (1.0, 1.6), [{"type": "sticker", "text": "محمد", "start_in_output": 0.9, "duration": 1}]))
+        self.assertFalse(repeats_graphic(words, (1.0, 1.6), [{"type": "sticker", "text": "داتا", "start_in_output": 0.9, "duration": 1}]))
+        self.assertTrue(repeats_graphic(words, (1.0, 1.6), [{"type": "logo", "start_in_output": 0.9, "duration": 1}]))
+        self.assertFalse(repeats_graphic(words, (1.0, 1.6), [{"type": "face", "start_in_output": 0.9, "duration": 1}]))
+
+
+class MaterialAndOverlayTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_kind_by_folder_and_extension(self):
+        from material import kind_for, tags_from_name
+        root = Path("/m")
+        self.assertEqual(kind_for(Path("/m/sound effect/Swoosh 23.wav"), root), "sfx")
+        self.assertEqual(kind_for(Path("/m/music/Happy.wav"), root), "music")
+        self.assertEqual(kind_for(Path("/m/Font/Cairo-Black.ttf"), root), "font")
+        self.assertEqual(kind_for(Path("/m/graphic/arrow.mov"), root), "graphic")
+        self.assertEqual(kind_for(Path("/m/BG/texture.jpg"), root), "background")
+        self.assertEqual(kind_for(Path("/m/transition/Light Leaks.MOV"), root), "transition")
+        self.assertIsNone(kind_for(Path("/m/plugn/Deep Glow/x.png"), root))
+        self.assertEqual(kind_for(Path("/m/loose/clip.wav"), root), "audio")
+        self.assertIn("question", tags_from_name("question mark ping spam (League of legends green screen effect)"))
+
+    def test_green_screen_keys_out(self):
+        from overlay_fx import keyed_rgba, keep_out_matte
+        frame = np.zeros((4, 4, 3), np.uint8)
+        frame[...] = (0, 255, 0)
+        frame[0, 0] = (255, 220, 30)  # a yellow stroke survives
+        rgba = keyed_rgba(frame, "green")
+        self.assertLess(rgba[2, 2, 3], 0.05)
+        self.assertGreater(rgba[0, 0, 3], 0.9)
+        matte = keep_out_matte((100, 200), "subject")
+        self.assertLess(matte[20, 50], 0.01)   # head band cleared
+        self.assertGreater(matte[20, 2], 0.99)  # edges kept
+        self.assertGreater(matte[190, 50], 0.99)  # below the shoulders kept

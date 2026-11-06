@@ -61,3 +61,20 @@ Default to no transition effect. The viewer should feel the story progressing, n
 ## Decision report
 
 For each unusual choice, record the chosen moment, effect or transition, viewer-facing purpose, and risk checked. If the reason is only “to make it dynamic,” leave the decision out or refine it.
+
+
+## Field lessons from client work
+
+These came from real feedback on testimonial and promo reels. Each is a craft rule, not a client style.
+
+- **Hook:**
+  - A question on screen works if it leaves before the next line is captioned.
+  - Stock "?" pings behind the speaker sell confusion, as long as they appear once and never on the face.
+- **Zoom fatigue:** a push on every line reads as nervous. One gentle move about every 5 s, at sentence starts, reads as directed.
+- **Caption discipline:**
+  - Readers lose time hunting for captions that move, so keep them in one spot.
+  - Never caption words that a graphic already shows.
+  - Punctuation on screen is noise in short-form.
+- **Text behind people:** only what sticks out reads. Scale the number until it frames the head, or put the word above the head.
+- **Sound:** an effect without a sound feels unfinished, and a sound on every gentle zoom feels cheap. Pick from the editor's own library before synthesising.
+- **Brand assets:** use the full logo with the wordmark, cut out cleanly. Never just the mark when the name is the point.

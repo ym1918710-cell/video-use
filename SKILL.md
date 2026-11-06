@@ -103,6 +103,8 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
 - **`compare_takes.py --edit-dir <dir>`** — ranks repeated lines across takes.
 - **`camera.py`** — keyframed zoom / pan / face-track maths (`zoom`, `camera`, `track` on a range); called by `render.py`.
 - **`multicam.py sync|switch <edl.json>`** — angle sync by audio; cuts to the speaker's angle.
+- **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
+- **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
 - **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.
 - **`text_render.py`** — Pillow + libraqm text engine (Linux twin of CoreText); `VIDEO_USE_TEXT_ENGINE=pil` forces it.
 - **`analyze_references.py <files|dir> -o reference_analysis.json`** — measures finished reference videos (format, shot length, loudness, silence, dominant colours) so a style or brand kit can be learned from examples.
@@ -401,6 +403,39 @@ This is one style. If the brand is warm and serif, use that. If it's colorful an
 10. **"Do not ask questions. If anything is ambiguous, pick the most obvious interpretation and proceed."**
 
 One sub-agent = one file (unique filenames, parallel agents don't overwrite each other).
+
+## The material folder (check it before inventing anything)
+
+The user keeps licensed material on this machine: sound effects, music, fonts, graphics (alpha MOVs and green-screen clips), backgrounds, transitions, LUTs and templates. Register it once with `material.py add <folder>`; it is remembered in `~/video-use-library/config.json`. Then:
+
+1. **Start every session** with `material.py summary`. If the folder changed, run `material.py scan`, which only re-reads changed files.
+2. **Search before you build.** For any graphic idea, sound, or font, run `material.py search <type> "<words>"` first. Use the user's asset when one fits. Generate (synth SFX, Three.js, PIL) only when nothing does, and say which one you chose.
+3. **Sound effects:** `auto_sfx` picks from the library by role, loudness-matched, and rotates so repeats don't sound canned. An element may name a file directly with `"sfx": "/path/to/shine.mp3"`.
+4. **Fonts:** a brand kit or caption skin may name a font ("Cairo Black"). It resolves to the file in the material folder. Arabic text only ever gets a font that covers Arabic.
+5. **Overlays:** put the raw file, or `material:<id>`, in an overlay and add `"prepare": {"recolor": [...], "glow": "#...", "keep_out": "subject", "play": "once"}`. Green and blue screens are keyed automatically, and alpha MOVs pass straight through.
+6. **LUTs and templates** (.mogrt / .aep) are listed but not applied: grading waits until the user trains it, and templates need Premiere or After Effects.
+
+## Field lessons (defaults learned from real client edits)
+
+Unless a brief says otherwise, these hold for every edit:
+
+- **Shot report before work.** Pull start, middle, and end frames of every chosen take, and measure each take's level, peak, and the director's voice before and after it. Report anything off-frame, clipped, or mis-transcribed before cutting.
+- **Fix the transcript's brand words** (product names, "KPIs", the client's name) in `transcripts/*.json` before captions are built, not after.
+- **B-roll lands on the word it shows.** Brand-coloured light transitions go in and out of B-roll when the client uses them.
+- **Zoom:** smooth keyframes only, never a cut-in zoom. Make one gentle move about every 5 s, at sentence starts, and keep the scale continuous across cuts. Above source resolution, cap the zoom at about 1.4×. Only a strong, fast move gets a sound.
+- **Captions:** `fixed: true` keeps them in one spot (about 0.66 down the frame), `skip_repeats: true` drops a cue that an on-screen graphic or the logo already says, and `strip_punctuation: true` removes punctuation. With fixed captions, a text graphic in the caption area leaves as the next caption starts.
+- **Text:**
+  - Never on a face.
+  - Never wider than the frame.
+  - Highlight words in the brand accent.
+  - The client's signature shapes live in `brand_kit.json → text_styles`.
+- **Text behind the subject** must be bigger than the body (a huge numeral) or sit beside or above the head. Otherwise the person hides it all. Behind layers may bleed off-frame.
+- **Stock overlays** play once, around the speaker, never on the face. Use `keep_out: "subject"` as well as the matte, and render the person matte at `quality: "accurate"`.
+- **Every visible effect has a sound**, from the material library first.
+- **No colour grade** until the user asks for one or has trained the look. Colour matching between cameras is a separate, explicit step.
+- **The outro dissolves over the last shot.** Never cut to black first.
+- **First cut first:** picture, framing, B-roll and dialogue only, with no SFX, graphics, or captions. Wait for approval.
+- **Verify by eye.** After every render, pull exact frames (with `select=eq(n,N)`, never input `-ss` on the output) at each graphic, each transition, and the hook. Fix what you see before sending.
 
 ## Music and sound effects (when requested)
 
