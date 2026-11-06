@@ -489,3 +489,15 @@ class MaterialAndOverlayTests(unittest.TestCase):
         self.assertLess(matte[20, 50], 0.01)   # head band cleared
         self.assertGreater(matte[20, 2], 0.99)  # edges kept
         self.assertGreater(matte[190, 50], 0.99)  # below the shoulders kept
+
+
+class PremiereExportTests(unittest.TestCase):
+    def test_clip_xml_carries_timing_and_level(self):
+        sys.path.insert(0, str(HELPERS))
+        from export_timeline import _Xml
+        x = _Xml("30/1", (1080, 1920))
+        x.file = lambda path, kind="video": '<file id="f1"/>'
+        clip = x.clip(Path("/tmp/a.wav"), 2.0, 0.5, 1.0, audio=True, gain_db=-6)
+        self.assertIn("<start>60</start><end>75</end><in>30</in><out>45</out>", clip)
+        self.assertIn("<value>0.50119</value>", clip)
+        self.assertIn("<mediatype>audio</mediatype>", clip)

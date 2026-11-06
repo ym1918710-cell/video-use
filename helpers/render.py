@@ -871,6 +871,9 @@ def probe_video_size(path: Path) -> tuple[int, int]:
     return int(stream["width"]), int(stream["height"])
 
 
+TRANSITION_CLIPS: list[dict] = []  # what the last render laid over its cuts (for NLE export)
+
+
 def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[dict], rate: str,
                       preview: bool, draft: bool) -> Path:
     """Lay centred transition clips over the cut points of the assembled base.
@@ -939,6 +942,7 @@ def apply_transitions(edl: dict, edit_dir: Path, base_path: Path, plans: list[di
         start = timing[i][1] - hd
         clips.append((clip, start, n / fps))
         print(f"  [{i:02d}] {kind} {n / fps * 1000:.0f}ms @ {timing[i][1]:.2f}s")
+    TRANSITION_CLIPS[:] = [{"file": str(c), "start_in_output": st, "duration": d} for c, st, d in clips]
     if not clips:
         return base_path
     out = base_path.with_name(base_path.stem + "_fx.mp4")
@@ -1430,6 +1434,36 @@ def loudnorm_filter(audio_path: Path, one_pass: bool = False) -> str:
 # -------- Final compositing (Rule 1 + Rule 4) -------------------------------
 
 
+def write_render_manifest(edit_dir: Path, edl: dict, out_path: Path, base_path: Path, canvas: tuple[int, int],
+                          rate: str, total_s: float, audio_path: Path, overlays: list[dict],
+                          behind: list[dict], mask: Path | None, subs: Path | None) -> Path:
+    """Everything this render composited, with output times — what an NLE
+    export needs to rebuild the timeline layer by layer."""
+    from graphics import output_time
+    sfx = []
+    for item in (edl.get("audio") or {}).get("sfx") or []:
+        try:
+            start = float(item["start_in_output"]) if "start_in_output" in item else output_time(edl, item["at"], rate)
+        except Exception:
+            continue
+        sfx.append({"file": str(resolve_path(item["file"], edit_dir)) if not str(item["file"]).startswith("library:") else item["file"],
+                    "start_in_output": round(start, 4), "gain_db": float(item.get("gain_db", -6)),
+                    "label": item.get("label") or item.get("auto") or Path(str(item["file"])).stem})
+    keep = ("file", "x", "y", "w", "h", "start_in_output", "duration", "type", "text")
+    manifest = {
+        "output": str(out_path), "base": str(base_path), "canvas": list(canvas), "rate": rate, "total_s": total_s,
+        "audio_mix": str(audio_path), "stems": str(edit_dir / "stems"),
+        "overlays": [{k: o.get(k) for k in keep if k in o} for o in overlays],
+        "behind_subject_overlays": [{k: o.get(k) for k in keep if k in o} for o in behind],
+        "subject_mask": str(mask) if mask else None, "subtitles": str(subs) if subs else None,
+        "transitions": list(TRANSITION_CLIPS), "sfx": sfx,
+        "timing": [list(t) for t in segment_timing(edl["ranges"], rate)],
+    }
+    path = edit_dir / "render_manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def ensure_subject_mask(base_path: Path, edit_dir: Path, config: dict | None) -> Path | None:
     """Generate a local person matte only when behind-subject layers need it."""
     if not config or config.get("mode") != "person":
@@ -1744,6 +1778,8 @@ def main() -> None:
 
     # 6. Composite (overlays + subtitles LAST); AAC is encoded once, here
     subject_mask = ensure_subject_mask(base_path, edit_dir, mask_config) if behind_subject_overlays else None
+    write_render_manifest(edit_dir, edl, out_path, base_path, canvas, rate, total_s, audio_path, overlays,
+                          behind_subject_overlays, subject_mask, subs_path)
     build_final_composite(
         base_path, overlays, subs_path, out_path, edit_dir,
         behind_subject_overlays, subject_mask,

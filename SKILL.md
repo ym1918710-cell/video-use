@@ -99,7 +99,13 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
 - **`graphics.py`** — renders the EDL's `graphics` (stickers, numbers, headlines, lower thirds, logo, end card) from `brand_kit.json` tokens; called by `render.py`.
 - **`audio_mix.py`** — dialogue chain, speech-aware music ducking, SFX, stems; called by `render.py`.
 - **`face_anchor.py`** — local Vision face centres per range (face framing, auto punch-in).
-- **`export_timeline.py <edl.json>`** — CMX3600 + FCP7 XML hand-off for Premiere / Resolve / Avid.
+- **`export_timeline.py <edl.json> [--premiere]`** — CMX3600 + FCP7 XML hand-off for Premiere, Resolve, or Avid. `--premiere` rebuilds the *finished* edit from the last render's `render_manifest.json` as a layered Premiere project:
+  - V1: the picture, cut at every edit.
+  - V2: the layers behind the subject.
+  - V3: a subject cut-out above them.
+  - V4: graphics. V5: captions. V6: the sources, disabled.
+  - A1: dialogue. A2: one clip per SFX, at its level. A3: the source audio, disabled.
+  - Alongside it: an `.srt` and the `_media/` folder. Import it in Premiere with File → Import.
 - **`compare_takes.py --edit-dir <dir>`** — ranks repeated lines across takes.
 - **`camera.py`** — keyframed zoom / pan / face-track maths (`zoom`, `camera`, `track` on a range); called by `render.py`.
 - **`multicam.py sync|switch <edl.json>`** — angle sync by audio; cuts to the speaker's angle.
