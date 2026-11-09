@@ -67,7 +67,13 @@ class Bridge:
 
     sequence: str | None = None  # every call after the sequence exists names it explicitly
 
+    fps: float | None = None  # set once the sequence is known: times snap to its frame grid
+
     def __call__(self, fn: str, **args: Any) -> dict:
+        if self.fps:  # Premiere snaps every edit to a frame; send frame times so look-ups match
+            for key in ("start", "fromStart"):
+                if isinstance(args.get(key), (int, float)) and not (key == "fromStart" and args.get("fromSequence") != self.sequence):
+                    args[key] = round(round(args[key] * self.fps) / self.fps, 6)
         if self.sequence and "sequence" not in args and fn not in ("importFiles", "newSequence", "sequences", "ping", "save"):
             args["sequence"] = self.sequence
         self.log.append({"fn": fn, "args": args})
@@ -378,7 +384,7 @@ def favourite_sfx_map(house: dict) -> dict[str, str]:
                 break
     return out
 
-SECTIONS = ("picture", "zoom", "light", "behind", "graphics", "sfx", "captions", "caption_fx")
+SECTIONS = ("picture", "broll", "zoom", "light", "behind", "graphics", "sfx", "captions", "caption_fx")
 
 
 def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set[str] | None = None) -> dict:
@@ -438,7 +444,11 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         element = next((g for g in gfx_elements if (g.get("covers") or g.get("text") or g.get("title") or "") == (o.get("text") or "")
                         and g.get("type") == o.get("type")), None)
         text_layers = (brand.get("premiere_house") or {}).get("text_layers")
-        if element and text_layers and element.get("type") in ("headline", "sticker", "title_card", "lower_third"):
+        # Only the text shape the editor's layers are (by default his bubble);
+        # other client shapes (streak, outline, big text) stay rendered.
+        layer_styles = (brand.get("premiere_house") or {}).get("text_layers_styles") or ["bubble"]
+        if element and text_layers and element.get("type") in ("headline", "sticker", "title_card", "lower_third") \
+                and (element.get("text_style") in layer_styles or not element.get("text_style")):
             # The editor's own text graphic: their layers copied with every
             # setting; the words go in a marker for them to type in Source Text.
             # Timed so the text is *readable* on its word with their entrance.
@@ -513,6 +523,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         bridge("newSequence", name=title, **{"from": str(sources[ranges[0]["source"]])}, bin=bin_name,
                width=canvas[0], height=canvas[1], fps=fps, replace=True)
     bridge.sequence = title
+    bridge.fps = fps
     sfx_lanes = spread([(float(s["start_in_output"]), float(s["start_in_output"]) + float(probe(_resolve(s["file"], base_dir))
                          .get("format", {}).get("duration", 0.5) or 0.5)) for s in sfx])
     house_zoom = (brand.get("premiere_house") or {}).get("zoom") or {}
@@ -521,13 +532,17 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     gfx_lanes = spread([(g["start"], g["start"] + g["duration"]) for g in graphics])
     n_behind = 1 + max(behind_lanes + [0])
     n_gfx = 1 + max(gfx_lanes + [0])
-    T_LIGHT, T_BEHIND = 1, 2
+    # V2 B-roll laid over the editor's own V1 (when the picture isn't rebuilt),
+    # then behind-subject text, the cut-out, graphics; the light flash above
+    # all of them (else a B-roll or a card hides it) and the zoom on top.
+    T_BROLL, T_BEHIND = 1, 2
     T_CUT = T_BEHIND + n_behind
     T_GFX = T_CUT + 1
     n_gfx += len((brand.get("premiere_house") or {}).get("text_layers") or [])
+    T_LIGHT = T_GFX + n_gfx
     if house_zoom.get("method") == "adjustment_transform":
-        house_zoom = dict(house_zoom, track=max(int(house_zoom.get("track", 0)), T_GFX + n_gfx))
-    video_tracks = max(video_tracks, T_GFX + n_gfx + 1, int(house_zoom.get("track", 0)) + 1)
+        house_zoom = dict(house_zoom, track=max(int(house_zoom.get("track", 0)), T_LIGHT + 1))
+    video_tracks = max(video_tracks, T_LIGHT + 2, int(house_zoom.get("track", 0)) + 1)
     n_comp_lanes = 0
     _comps = (brand.get("premiere_house") or {}).get("text_sfx") or []
     if _comps and (brand.get("premiere_house") or {}).get("text_layers"):
@@ -535,9 +550,16 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         n_comp_lanes = 1 + max(spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"])
                                        for g in _texts for c in _comps]) + [0]) if _texts else 0
     bridge("ensureTracks", video=video_tracks, audio=1 + max(sfx_lanes + [0]) + 1 + n_comp_lanes)
+    from render import outro_index
+    oi = outro_index(edl, base_dir)
+    outro_start = None  # nothing of ours may sit under the outro: it covers everything
+    if oi is not None:
+        lean = float(((ranges[oi].get("transition") or {}).get("duration_ms") or 0)) / 1000 or float(
+            ((brand.get("premiere_house") or {}).get("outro") or {}).get("overlap_s", 0.33))
+        outro_start = max(0.0, timing[oi][1] - lean)
     if only:  # clear just the tracks of the parts being updated; everything else (and hand edits) stays
         n_layers = len((brand.get("premiere_house") or {}).get("text_layers") or [])
-        clear = {"picture": [("video", 0), ("audio", 0)], "light": [("video", T_LIGHT)],
+        clear = {"picture": [("video", 0), ("audio", 0)], "light": [("video", T_LIGHT)], "broll": [("video", T_BROLL)],
                  "behind": [("video", T_BEHIND + i) for i in range(n_behind)] + [("video", T_CUT)],
                  "graphics": [("video", T_GFX + i) for i in range(n_gfx)]
                              + [("audio", 1 + max(sfx_lanes + [0]) + 1 + i) for i in range(n_comp_lanes)],
@@ -545,12 +567,11 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
                  "zoom": [("video", int(house_zoom.get("track", 0)))] if house_zoom.get("method") == "adjustment_transform" else []}
         for section in only:
             for kind, idx in clear.get(section, []):
-                bridge("clearTrack", kind=kind, track=idx)
+                # only up to the outro: an outro the editor placed by hand stays
+                bridge("clearTrack", kind=kind, track=idx, **({"to": outro_start - 0.01} if outro_start else {}))
 
     infos = {name: probe(path) for name, path in sources.items()}
     # Sound first (each overwrite then loses its dragged-along picture), then picture.
-    from render import outro_index
-    oi = outro_index(edl, base_dir)
     for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
         if not want("picture"):
             break
@@ -590,7 +611,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
             motion.update(anchor=[raw[0], raw[1]], position=[px, py])  # zoom pivots on the face
         zoom_house = house_zoom
         house = brand.get("premiere_house") or {}
-        moves = len({kk["scale"] for kk in keys}) > 1
+        moves = len({kk["scale"] for kk in keys}) > 1 or any(kk["scale"] > cover * 1.001 for kk in keys)
         if zoom_house.get("method") == "adjustment_transform" and zoom_house.get("adjustment_item"):
             # The editor's way: picture fitted on V1, the zoom on an Adjustment
             # Layer above it with a Transform effect.
@@ -598,6 +619,8 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
                 bridge("motion", track=0, start=start, keys=[{"t": 0, "scale": cover}], **({"rotation": motion["rotation"]} if rot else {}))
             if moves and want("zoom"):
                 adj_track = int(zoom_house.get("track", 5))
+                if outro_start is not None and k != oi and start + dur > outro_start:
+                    dur = max(1 / fps, outro_start - start)
                 bridge("placeItem", nodeId=zoom_house["adjustment_item"], track=adj_track, start=start, duration=dur, name="zoom")
                 ex = house.get("zoom_exemplar")
                 if ex:  # paste the editor's own Transform (shutter, settings), then our keys
@@ -621,6 +644,19 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         elif want("picture") or want("zoom"):
             bridge("motion", **motion)
 
+    if only and "broll" in only and "picture" not in only:
+        # The editor's V1 stays: B-roll goes on V2 over it, fitted to the canvas.
+        from render import is_broll
+        for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
+            if k == oi or not is_broll(r):
+                continue
+            src = sources[r["source"]]
+            info = probe(src)
+            video = next((x for x in info.get("streams", []) if x.get("codec_type") == "video"), {})
+            cover = max(canvas[0] / int(video.get("width") or canvas[0]), canvas[1] / int(video.get("height") or canvas[1])) * 100
+            bridge("place", path=str(src), kind="video", track=T_BROLL, start=start,
+                   **{"in": float(r["start"]), "out": float(r["start"]) + dur}, name=str(r.get("beat") or "B-roll")[:60])
+            bridge("motion", track=T_BROLL, start=start, keys=[{"t": 0, "scale": cover}])
     if oi is not None and want("picture"):
         # The outro covers everything: top track, fading in over the picture
         # (never through black), its sound on its own track.
@@ -669,6 +705,14 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         bridge("place", path=str(flat), kind="video", track=T_BEHIND + lane, start=start, **{"in": 0.0, "out": dur}, name=f"behind: {label}"[:60])
     for cut, start, dur in (cutouts if want("behind") else []):
         bridge("place", path=str(cut), kind="video", track=T_CUT, start=start, **{"in": 0.0, "out": dur}, name="subject cut-out")
+        if not bridge.dry:  # his Lumetri on V1 → the cut-out, so the person on top matches the graded picture
+            under = next((t[1] for t in timing if t[1] <= start + 1e-3 < t[1] + t[2]), None)
+            if under is not None:
+                try:
+                    bridge("copyAttributes", fromSequence=title, fromTrack=0, fromStart=under, track=T_CUT, start=start,
+                           only=["Lumetri Color"])
+                except RuntimeError as e:
+                    print(f"cut-out grade: {e}")
     layered = [g for g in graphics if "layers" in g]
     graphics = [g for g in graphics if "layers" not in g]
     gfx_lanes = spread([(g["start"], g["start"] + g["duration"]) for g in graphics])

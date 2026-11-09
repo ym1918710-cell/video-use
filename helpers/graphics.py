@@ -299,6 +299,18 @@ def rasterize_cards(cards: list[dict], workdir: Path) -> None:
 
 # ---------------------------------------------------------------- motion
 
+def element_shadow(element: dict, tokens: "Tokens") -> dict | None:
+    """The shadow for one graphic: off with ``"shadow": false``, its own
+    Premiere-style numbers with a dict (e.g. text behind a person wants a hard
+    one: ``{"distance": 15, "softness": 0}``), else the brand's soft default."""
+    spec = element.get("shadow")
+    if spec is False:
+        return None
+    if isinstance(spec, dict):
+        return premiere_shadow(spec)
+    return tokens.shadow
+
+
 def premiere_shadow(spec: dict) -> dict:
     """Premiere Drop Shadow settings (distance / softness in px at 1080 wide,
     opacity 0–1 or 0–255) → add_drop_shadow's ratios."""
@@ -674,7 +686,7 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
         if recipe is None:
             raise ValueError(f"unknown text_style {element['text_style']!r}: add it to the brand kit's text_styles")
         anim = element.get("animation") or recipe.get("animation") or anim
-        shadow = None if element.get("shadow") is False else tokens.shadow
+        shadow = element_shadow(element, tokens)
         parts = render_styled(element, recipe, tokens, canvas, workdir, rasterize_cards)
         full_width = bool(recipe.get("streaks"))
         limit = w * (1.0 if full_width else 0.9)
@@ -694,7 +706,7 @@ def build_element(element: dict, edl: dict, tokens: Tokens, canvas: tuple[int, i
         return {"file": str(out), "start_in_output": start, "duration": duration, "x": x, "y": y,
                 "w": box[0], "h": box[1], "type": kind, "full_width": full_width}
     else:
-        shadow = None if element.get("shadow") is False else tokens.shadow
+        shadow = element_shadow(element, tokens)
         spec = apply_style(card_spec(element, tokens, canvas), element, tokens, canvas)
         if shadow:
             spec.pop("shadow", None)  # one shadow, drawn below for every engine

@@ -43,9 +43,15 @@ var vu = (function () {
     }
     function activeSeq(args) { return (args && args.sequence) ? seqByName(args.sequence) : app.project.activeSequence; }
     function trackOf(seq, kind, index) { return kind === "audio" ? seq.audioTracks[index] : seq.videoTracks[index]; }
+    // The clip starting at `start`. Premiere snaps edits to the frame grid, so
+    // take the nearest start within half a frame at 24 fps (not an exact match).
     function clipAt(track, start) {
-        for (var i = 0; i < track.clips.numItems; i++) if (Math.abs(track.clips[i].start.seconds - start) < 0.02) return track.clips[i];
-        return null;
+        var best = null, gap = 0.021;
+        for (var i = 0; i < track.clips.numItems; i++) {
+            var d = Math.abs(track.clips[i].start.seconds - start);
+            if (d <= gap) { best = track.clips[i]; gap = d; }
+        }
+        return best;
     }
     function component(clip, name) {
         for (var i = 0; i < clip.components.numItems; i++) {
@@ -281,10 +287,11 @@ var vu = (function () {
             var dst = clipAt(trackOf(seq, a.kind || "video", a.track), a.start);
             if (!src || !dst) return { error: "clip missing (src " + !!src + ", dst " + !!dst + ")" };
             var skip = {}; for (var si = 0; a.skip && si < a.skip.length; si++) skip[a.skip[si]] = true;
+            var only = null; if (a.only) { only = {}; for (var oi2 = 0; oi2 < a.only.length; oi2++) only[a.only[oi2]] = true; }
             var copied = [], added = [], errors = [];
             for (var c = 0; c < src.components.numItems; c++) {
                 var sc = src.components[c];
-                if (skip[sc.displayName]) continue;
+                if (skip[sc.displayName] || (only && !only[sc.displayName])) continue;
                 var dc = null;
                 for (var d = 0; d < dst.components.numItems; d++) if (dst.components[d].matchName === sc.matchName) { dc = dst.components[d]; break; }
                 if (!dc) {
