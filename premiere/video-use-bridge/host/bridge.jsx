@@ -121,6 +121,14 @@ var vu = (function () {
         return null;
     }
 
+    // Put track targeting back as the editor had it. An overwrite can make
+    // Premiere add a track (a stereo clip on a mono lane), so only the
+    // tracks that existed before are restored.
+    function restoreTargets(seq, saved) {
+        for (var i = 0; i < Math.min(seq.videoTracks.numTracks, saved.v.length); i++) seq.videoTracks[i].setTargeted(saved.v[i], true);
+        for (var j = 0; j < Math.min(seq.audioTracks.numTracks, saved.a.length); j++) seq.audioTracks[j].setTargeted(saved.a[j], true);
+    }
+
     var api = {
         sequences: function () {
             var out = [];
@@ -130,6 +138,29 @@ var vu = (function () {
                            end: s.end ? Number(s.end) / TICKS : null });
             }
             return { sequences: out, active: app.project.activeSequence ? app.project.activeSequence.name : null };
+        },
+        // Read-only: the In/Out marks the editor set — on the active (or named)
+        // sequence, and on project clips whose name contains `match`.
+        marks: function (a) {
+            var out = { sequence: null, items: [] };
+            var seq = activeSeq(a);
+            if (seq) {
+                var si = Number(seq.getInPoint()), so = Number(seq.getOutPoint());
+                out.sequence = { name: seq.name, "in": si, out: so, end: seq.end ? Number(seq.end) / TICKS : null };
+            }
+            function walk(bin) {
+                for (var i = 0; i < bin.children.numItems; i++) {
+                    var it = bin.children[i];
+                    if (it.type === 2) { walk(it); continue; }  // a bin
+                    if (a.match && String(it.name).indexOf(a.match) < 0) continue;
+                    var rec = { name: it.name, nodeId: it.nodeId, path: it.getMediaPath ? it.getMediaPath() : null };
+                    try { rec["in"] = it.getInPoint(1).seconds; rec.out = it.getOutPoint(1).seconds; } catch (e) { rec.err = String(e); }
+                    try { rec.audioIn = it.getInPoint(2).seconds; rec.audioOut = it.getOutPoint(2).seconds; } catch (e2) {}
+                    out.items.push(rec);
+                }
+            }
+            if (a.match) walk(app.project.rootItem);
+            return out;
         },
         // Everything on a sequence: tracks → clips (item, MOGRT params) and,
         // when `props` is set, every component with its keyframes.
@@ -158,13 +189,11 @@ var vu = (function () {
             if (!item) return { error: "no project item " + a.nodeId };
             var kind = a.kind || "video";
             var track = trackOf(seq, kind, a.track);
-            var saved = [], v, t2;  // target only the destination (no dragged-along audio from nests / comps)
-            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(kind !== "audio" && v === a.track, true); }
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(kind === "audio" && t2 === a.track, true); }
+            var saved = { v: [], a: [] }, v, t2;  // target only the destination (no dragged-along audio from nests / comps)
+            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.v.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(kind !== "audio" && v === a.track, true); }
+            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.a.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(kind === "audio" && t2 === a.track, true); }
             track.overwriteClip(item, a.start);
-            var n = 0;
-            for (v = 0; v < seq.videoTracks.numTracks; v++) seq.videoTracks[v].setTargeted(saved[n++], true);
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) seq.audioTracks[t2].setTargeted(saved[n++], true);
+            restoreTargets(seq, saved);
             var clip = clipAt(track, a.start);
             if (!clip) return { error: "placed item not found" };
             var other = kind === "audio" ? seq.videoTracks : seq.audioTracks;
@@ -372,11 +401,20 @@ var vu = (function () {
 
         ensureTracks: function (a) {
             var seq = activeSeq(a);
-            app.enableQE();
-            var qs = qe.project.getActiveSequence();
+            if (!seq) return { error: "no sequence " + (a.sequence || "(active)") };
             var addV = Math.max(0, a.video - seq.videoTracks.numTracks);
             var addA = Math.max(0, a.audio - seq.audioTracks.numTracks);
-            if (addV || addA) qs.addTracks(addV, seq.videoTracks.numTracks, addA, 1, seq.audioTracks.numTracks, 0, 0);
+            if (!addV && !addA) return { ok: true, video: seq.videoTracks.numTracks, audio: seq.audioTracks.numTracks };
+            // QE only edits the ACTIVE sequence: bring the named one forward
+            // first, and refuse rather than add tracks to someone else's.
+            if (!app.project.activeSequence || app.project.activeSequence.sequenceID !== seq.sequenceID) app.project.openSequence(seq.sequenceID);
+            app.enableQE();
+            var qs = qe.project.getActiveSequence();
+            if (!qs || qs.name !== seq.name) return { error: "QE is on another sequence (" + (qs ? qs.name : "none") + "), not " + seq.name };
+            qs.addTracks(addV, seq.videoTracks.numTracks, addA, 1, seq.audioTracks.numTracks, 0, 0);
+            seq = activeSeq(a);
+            if (seq.videoTracks.numTracks < a.video || seq.audioTracks.numTracks < a.audio)
+                return { error: "tracks not added: have " + seq.videoTracks.numTracks + "v/" + seq.audioTracks.numTracks + "a, wanted " + a.video + "v/" + a.audio + "a" };
             return { ok: true, video: seq.videoTracks.numTracks, audio: seq.audioTracks.numTracks };
         },
 
@@ -391,13 +429,11 @@ var vu = (function () {
             var track = trackOf(seq, a.kind, a.track);
             // Target only the destination track, as an editor does before an
             // overwrite: video never lands on the sound and vice versa.
-            var saved = [], v, t2;
-            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(a.kind !== "audio" && v === a.track, true); }
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(a.kind === "audio" && t2 === a.track, true); }
+            var saved = { v: [], a: [] }, v, t2;
+            for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.v.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(a.kind !== "audio" && v === a.track, true); }
+            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.a.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(a.kind === "audio" && t2 === a.track, true); }
             track.overwriteClip(item, a.start);
-            var n = 0;
-            for (v = 0; v < seq.videoTracks.numTracks; v++) seq.videoTracks[v].setTargeted(saved[n++], true);
-            for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) seq.audioTracks[t2].setTargeted(saved[n++], true);
+            restoreTargets(seq, saved);
             item.clearInPoint(4); item.clearOutPoint(4);
             var clip = clipAt(track, a.start);
             if (!clip) return { error: "placed clip not found at " + a.start };
