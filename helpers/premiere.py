@@ -826,10 +826,11 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         start = float(s["start_in_output"])
         bridge("place", path=str(path), kind="audio", track=1 + lane, start=start, **{"in": 0.0, "out": dur})
         bridge("volume", track=1 + lane, start=start, db=float(s["gain_db"]))
-    if edl.get("captions") and (not only or "captions" in only):
+    no_captions = bool((brand.get("premiere_house") or {}).get("no_captions"))  # he makes subtitles himself
+    if edl.get("captions") and not no_captions and (not only or "captions" in only):
         bridge("captions", srt=str(srt), start=0.0)
     cap_house = (brand.get("premiere_house") or {}).get("captions") or {}
-    if cap_house.get("exemplar") and (not only or "caption_fx" in only) and not bridge.dry:
+    if cap_house.get("exemplar") and not no_captions and (not only or "caption_fx" in only) and not bridge.dry:
         # After the editor upgrades the caption track to graphics, paste his
         # subtitle look onto every one (skipping Text, so each keeps its words).
         ex = cap_house["exemplar"]

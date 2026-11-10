@@ -1823,7 +1823,8 @@ def main() -> None:
             build_master_srt(edl, edit_dir, subs_path)
         elif edl.get("subtitles"):
             subs_path = resolve_subtitles_path(edl["subtitles"], edit_dir)
-        elif edl.get("captions"):
+        elif edl.get("captions") and not ((_brand_kit(edl, edit_dir).get("caption_skin") or {}).get("off")):
+            # (caption_skin.off: the editor makes the subtitles himself)
             from build_captions import build_caption_track, needs_coretext_track, write_styled_captions
             # The ASS is always written: QC reads caption timing from it.
             keep_out = graphic_boxes + faces
