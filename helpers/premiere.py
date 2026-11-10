@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import shutil
 import sys
 import urllib.request
@@ -859,6 +860,8 @@ def main() -> None:
     p_build.add_argument("edl", type=Path)
     p_build.add_argument("--project", type=Path, help="create/open this .prproj first (default: the open project)")
     p_build.add_argument("--plan-only", action="store_true", help="print the Premiere calls without sending them")
+    p_build.add_argument("--prepare", action="store_true",
+                         help="Premiere path: first make the assets only (graphics, matte, SFX list) — no final video render")
     p_build.add_argument("--only", help=f"update just these parts of the existing sequence, comma-separated: {', '.join(SECTIONS)}")
     args = parser.parse_args()
     if args.cmd == "install":
@@ -886,6 +889,10 @@ def main() -> None:
         only = {x.strip() for x in args.only.split(",")} if args.only else None
         if only and only - set(SECTIONS):
             raise SystemExit(f"--only takes: {', '.join(SECTIONS)}")
+        if args.prepare:  # the Premiere path: assets only, never a final video render
+            edl_path = args.edl.resolve()
+            subprocess.run([sys.executable, str(Path(__file__).with_name("render.py")), str(edl_path),
+                            "-o", str(edl_path.parent / "premiere_preview.mp4"), "--premiere-assets"], check=True)
         result = build(args.edl, b, args.project, only)
         if args.plan_only:
             print(json.dumps(b.log, ensure_ascii=False, indent=1)[:6000])

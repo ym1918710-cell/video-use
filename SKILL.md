@@ -115,6 +115,7 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - Premiere can't script native text graphics, only MOGRT text, so use a MOGRT from the project.
   - Subtitles: `build` imports the SRT as a caption track. The editor runs Graphics → Upgrade Caption to Graphic, then `build --only caption_fx` pastes the learned subtitle clip (`premiere_house.captions`: entrance, shadow, Motion position) onto every one, skipping Text so each keeps its words.
   - Zoom: Transform with Uniform Scale on, keys on Scale.
+  - **Two paths.** For "on the device", render with `run_edit.py`. For "in Premiere", run `build --prepare` straight away. It makes only the assets (graphics, matte, SFX list, manifest), with no mix, no final video and no QC render, and the result is checked in the sequence itself.
   - The project is never saved for the editor.
 - **`beats.py suggest <edl.json>`** finds lines that earn a beat in the transcripts, such as the **denial** ("أنا مش ممدوح", "I'm not…").
   - Put them in `edl["beats"]` and the render adds a colour strobe behind the subject (local matte keeps them in front) and an error buzzer 0.2 s early.

@@ -344,6 +344,14 @@ var vu = (function () {
             fresh.name = a.name;
             return { ok: true, nodeId: fresh.nodeId, reused: false };
         },
+        // Move the end of the clip at `start` (e.g. so nothing runs over the outro).
+        setEnd: function (a) {
+            var seq = activeSeq(a);
+            var clip = clipAt(trackOf(seq, a.kind || "video", a.track), a.start);
+            if (!clip) return { error: "no clip at " + a.start };
+            clip.end = seconds(a.end);
+            return { ok: true, end: clip.end.seconds };
+        },
         // Remove every clip on a track (optionally only inside [from, to)).
         clearTrack: function (a) {
             var seq = activeSeq(a);

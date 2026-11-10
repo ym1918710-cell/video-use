@@ -1722,6 +1722,9 @@ def main() -> None:
              "--fps 30000/1001 to force.",
     )
     ap.add_argument("--canvas", help="Override the output canvas, e.g. 1080x1350 (deliverable versions)")
+    ap.add_argument("--premiere-assets", action="store_true",
+                    help="Premiere path: make only what the Premiere build places (graphics, matte, cut-outs, "
+                         "the SFX list, render_manifest.json) — no mix, loudness pass, caption track or final video")
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -1778,9 +1781,10 @@ def main() -> None:
         from audio_mix import level_to_peak
         edl = dict(edl, audio=dict(edl["audio"], sfx=level_to_peak(edl["audio"]["sfx"], edit_dir, float(levels["sfx"]))))
         print(f"sfx levels: every effect peaks at {levels['sfx']} dB")
-    audio_path = build_mix(edl, edit_dir, audio_path, total_s, at_resolver=lambda at: output_time(edl, at, rate))
+    if not args.premiere_assets:  # Premiere mixes in the timeline: the sounds go there as clips
+        audio_path = build_mix(edl, edit_dir, audio_path, total_s, at_resolver=lambda at: output_time(edl, at, rate))
     audio_filter = None
-    if not args.no_loudnorm:
+    if not args.no_loudnorm and not args.premiere_assets:
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         audio_filter = loudnorm_filter(audio_path, one_pass=args.draft)
 
@@ -1824,7 +1828,7 @@ def main() -> None:
             # The ASS is always written: QC reads caption timing from it.
             keep_out = graphic_boxes + faces
             ass_path = write_styled_captions(edl, edit_dir, canvas, keep_out, edit_dir / "captions.ass")
-            if needs_coretext_track(edl, edit_dir):
+            if needs_coretext_track(edl, edit_dir) and not args.premiere_assets:  # Premiere gets the SRT
                 overlays.append(build_caption_track(edl, edit_dir, canvas, keep_out, rate, total_s,
                                                     edit_dir / "captions_track" / "captions.mov"))
             else:
@@ -1855,6 +1859,9 @@ def main() -> None:
     subject_mask = ensure_subject_mask(base_path, edit_dir, mask_config) if behind_subject_overlays else None
     write_render_manifest(edit_dir, edl, out_path, base_path, canvas, rate, total_s, audio_path, overlays,
                           behind_subject_overlays, subject_mask, subs_path)
+    if args.premiere_assets:
+        print("premiere assets ready → render_manifest.json (no final video: build it in Premiere)")
+        return
     build_final_composite(
         base_path, overlays, subs_path, out_path, edit_dir,
         behind_subject_overlays, subject_mask,
