@@ -652,7 +652,8 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
                            track=adj_track, start=start, noKeys=True)
                 else:
                     bridge("addEffect", track=adj_track, start=start, name=zoom_house.get("effect") or "Transform")
-                zkeys = [{"t": kk["t"], "v": round(kk["scale"] / cover * 100, 3), "ease": kk.get("ease")} for kk in keys]
+                # Easy ease on every key (in and out), as the editor keys his zooms.
+                zkeys = [{"t": kk["t"], "v": round(kk["scale"] / cover * 100, 3), "ease": "smooth"} for kk in keys]
                 fx_name = zoom_house.get("effect") or "Transform"
                 # Uniform Scale on first: Premiere then shows one "Scale" that
                 # grows height and width together; key that one.
