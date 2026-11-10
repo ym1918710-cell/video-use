@@ -198,7 +198,10 @@ var vu = (function () {
             var saved = { v: [], a: [] }, v, t2;  // target only the destination (no dragged-along audio from nests / comps)
             for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.v.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(kind !== "audio" && v === a.track, true); }
             for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.a.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(kind === "audio" && t2 === a.track, true); }
+            var trimmed = a["in"] !== undefined && a.duration;
+            if (trimmed) { item.setInPoint(a["in"], 4); item.setOutPoint(a["in"] + a.duration, 4); }  // a piece from inside the item
             track.overwriteClip(item, a.start);
+            if (trimmed) { item.clearInPoint(4); item.clearOutPoint(4); }
             restoreTargets(seq, saved);
             var clip = clipAt(track, a.start);
             if (!clip) return { error: "placed item not found" };

@@ -578,3 +578,20 @@ class FinalReelLessonTests(unittest.TestCase):
         self.assertEqual(house["captions"]["track"], 12)
         self.assertEqual(house["captions"]["skip"], ["Text"])
         self.assertEqual(house["captions"]["shadow"], {"Distance": 12, "Softness": 35})
+
+
+class SoundDesignLevelTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_effects_are_levelled_to_their_peak_target(self):
+        from audio_mix import level_to_peak
+        with tempfile.TemporaryDirectory() as tmp:
+            tone = Path(tmp) / "tone.wav"  # a sine at half scale peaks at about -6 dBFS
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "aevalsrc=0.5*sin(2*PI*1000*t):d=0.5",
+                            "-c:a", "pcm_f32le", str(tone)], check=True)
+            items = [{"file": str(tone), "start_in_output": 1.0, "gain_db": -20},
+                     {"file": str(tone), "start_in_output": 2.0, "gain_db": -20, "gain_locked": True}]
+            got = level_to_peak(items, Path(tmp), -9.0)
+            self.assertAlmostEqual(got[0]["gain_db"], -9.0 - (-6.0), delta=0.6)  # lifted so the peak lands on -9
+            self.assertEqual(got[1]["gain_db"], -20)  # a locked gain stays

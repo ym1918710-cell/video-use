@@ -192,6 +192,37 @@ def render_music_cue(cue: dict, total: float, regions: list[tuple[float, float]]
     return out
 
 
+_PEAKS: dict[str, float] = {}
+
+
+def file_peak_db(path: Path) -> float | None:
+    """Sample peak of a sound file in dBFS (what Premiere's meter shows)."""
+    key = str(path)
+    if key not in _PEAKS:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", key, "-af", "volumedetect", "-f", "null", "-"],
+                             capture_output=True, text=True).stderr
+        m = re.search(r"max_volume:\s*(-?[\d.]+) dB", out)
+        _PEAKS[key] = float(m.group(1)) if m else None
+    return _PEAKS[key]
+
+
+def level_to_peak(items: list[dict], base: Path, target_db: float) -> list[dict]:
+    """Give every sound effect the gain that puts its peak on ``target_db``
+    (the editor's rule: effects peak around -9 dB under a voice at -3).
+    ``"gain_locked": true`` keeps an item's own gain."""
+    out = []
+    for item in items:
+        if item.get("gain_locked"):
+            out.append(item)
+            continue
+        peak = file_peak_db(_resolve(item["file"], base))
+        if peak is None:
+            out.append(item)
+            continue
+        out.append(dict(item, gain_db=round(target_db - peak, 2), peak_target_db=target_db))
+    return out
+
+
 def render_sfx(items: list[dict], total: float, base: Path, out: Path, at_resolver=None) -> Path:
     inputs: list[str] = []
     graph: list[str] = []

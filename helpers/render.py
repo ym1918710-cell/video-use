@@ -1773,6 +1773,11 @@ def main() -> None:
         print(f"auto sfx: {len(extra)} sound(s) for effects with none — "
               + ", ".join(sorted({f"{e['auto']}" for e in extra})))
         edl = dict(edl, audio=dict(edl.get("audio") or {}, sfx=list((edl.get("audio") or {}).get("sfx") or []) + extra))
+    levels = ((_brand_kit(edl, edit_dir).get("audio") or {}).get("levels_peak_db") or {})
+    if levels.get("sfx") is not None and (edl.get("audio") or {}).get("sfx"):
+        from audio_mix import level_to_peak
+        edl = dict(edl, audio=dict(edl["audio"], sfx=level_to_peak(edl["audio"]["sfx"], edit_dir, float(levels["sfx"]))))
+        print(f"sfx levels: every effect peaks at {levels['sfx']} dB")
     audio_path = build_mix(edl, edit_dir, audio_path, total_s, at_resolver=lambda at: output_time(edl, at, rate))
     audio_filter = None
     if not args.no_loudnorm:

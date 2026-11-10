@@ -422,7 +422,8 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         if spec and spec.get("type") == "light":
             color = spec.get("color") or ((brand.get("transitions") or {}).get("light") or {}).get("color") or "#FFB46E"
             clip, pre = light_overlay(color, rate, media / f"light_{color.lstrip('#')}.mov", canvas, float(spec.get("duration_ms", 470)))
-            lights.append((clip, timing[k][1] - pre / fps, (pre + 1 + (int(round(float(spec.get('duration_ms', 470)) / 1000 * fps)) - 1 - pre)) / fps))
+            lights.append((clip, timing[k][1] - pre / fps, (pre + 1 + (int(round(float(spec.get('duration_ms', 470)) / 1000 * fps)) - 1 - pre)) / fps,
+                           timing[k][1]))
     for k, o in enumerate(m["behind_subject_overlays"]):
         src = _resolve(o["file"], base_dir)
         flat = _flatten(src, media / f"behind_{k:02d}_{src.stem[:24]}.mov", canvas, int(o.get("x", 0)), int(o.get("y", 0)), rate)
@@ -443,6 +444,24 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     for k, o in enumerate(rendered):
         element = next((g for g in gfx_elements if (g.get("covers") or g.get("text") or g.get("title") or "") == (o.get("text") or "")
                         and g.get("type") == o.get("type")), None)
+        compare = (brand.get("premiere_house") or {}).get("compare_graphic") or {}
+        side = compare.get(element.get("compare")) if element else None
+        if side:
+            # His compare / count graphic: that side's AE comp (one copy per word),
+            # his settings from the exemplar, and that side's own sound.
+            sfx_dir = Path("/Users/m/Desktop/material/sound effect")
+            sound_path = None
+            if side.get("sfx"):
+                cand = sfx_dir / side["sfx"]
+                sound_path = cand if cand.exists() else next(sfx_dir.glob(side["sfx"] + "*"), None)
+            graphics.append({"layers": [{"nodeId": None, "aep": side["aep"], "comp": side["comp"], "exemplar": side["exemplar"],
+                                         "offset": 0.0, "name": side["comp"], "lane": 0 if element.get("compare") == "right" else 1}],
+                             "start": float(o["start_in_output"]), "duration": float(o["duration"]),
+                             "text": str(element.get("text", "")).replace("\n", " "),
+                             "companions": [{"file": str(sound_path), "offset": 0.0, "in": 0.0,
+                                             "duration": float(probe(sound_path).get("format", {}).get("duration", 1.0) or 1.0),
+                                             "exemplar": None}] if sound_path else []})
+            continue
         text_layers = (brand.get("premiere_house") or {}).get("text_layers")
         # Only the text shape the editor's layers are (by default his bubble);
         # other client shapes (streak, outline, big text) stay rendered.
@@ -505,6 +524,10 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         own = {str(g.get("text", "")).replace("\n", " ")[:30] for g in gfx_elements} if (brand.get("premiere_house") or {}).get("text_sfx") else set()
         sfx = hand + [{"file": i["file"], "start_in_output": i["start_in_output"], "gain_db": i["gain_db"], "label": i.get("auto")}
                       for i in picked if not (str(i.get("auto", "")).startswith("graphic:") and i.get("label", "")[:30].replace("\n", " ") in own)]
+        levels = (brand.get("audio") or {}).get("levels_peak_db") or {}
+        if levels.get("sfx") is not None:  # the editor's sound design: every effect peaks at ~-9 dB
+            from audio_mix import level_to_peak
+            sfx = level_to_peak(sfx, base_dir, float(levels["sfx"]))
 
     imports = sorted({str(p) for p in sources.values()} | {str(c) for c, *_ in lights} | {str(f) for f, *_ in behind}
                      | {str(c) for c, *_ in cutouts} | {str(g["file"]) for g in graphics if "file" in g}
@@ -548,7 +571,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     if _comps and (brand.get("premiere_house") or {}).get("text_layers"):
         _texts = [g for g in graphics if "layers" in g]
         n_comp_lanes = 1 + max(spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"])
-                                       for g in _texts for c in _comps]) + [0]) if _texts else 0
+                                       for g in _texts for c in g.get("companions", _comps)]) + [0]) if _texts else 0
     bridge("ensureTracks", video=video_tracks, audio=1 + max(sfx_lanes + [0]) + 1 + n_comp_lanes)
     from render import outro_index
     oi = outro_index(edl, base_dir)
@@ -690,7 +713,18 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
             ms = float(spec.get("duration_ms") or spec.get("in_ms") or 500)
             bridge("transition", track=0, start=timing[k][1], name=name, duration=ms / 1000, fps=fps)
     leak = (brand.get("premiere_house") or {}).get("light_leak")
-    for clip, start, dur in (lights if want("light") else []):
+    for clip, start, dur, cut_t in (lights if want("light") else []):
+        if leak and leak.get("nodeId") and leak.get("pair"):
+            # His transition exactly: the same light-leak graphic in two pieces
+            # around the cut, each with its own in-point and pasted settings.
+            for piece in leak["pair"]:
+                st = max(0.0, cut_t + float(piece["offset"]))
+                bridge("placeItem", nodeId=leak["nodeId"], track=T_LIGHT, start=st, duration=float(piece["duration"]),
+                       name="light leak", **({"in": float(piece["in"])} if piece.get("in") else {}))
+                ex = piece.get("exemplar") or leak.get("exemplar")
+                if ex:
+                    bridge("copyAttributes", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"], track=T_LIGHT, start=st)
+            continue
         if leak and leak.get("nodeId"):  # the editor's own light-leak graphic, centred on the cut
             ld = float(leak.get("typical_duration") or 0.3)
             cut = start + dur * 0.43
@@ -718,19 +752,27 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     gfx_lanes = spread([(g["start"], g["start"] + g["duration"]) for g in graphics])
     short = title.replace(" (video-use)", "")
     companions = (brand.get("premiere_house") or {}).get("text_sfx") or []
-    comp_lanes = spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"]) for g in layered for c in companions])
+    comp_lanes = spread([(g["start"] + c["offset"], g["start"] + c["offset"] + c["duration"])
+                         for g in layered for c in g.get("companions", companions)])
     first_comp_track = 1 + max(sfx_lanes + [0]) + 1
     fade = float((brand.get("premiere_house") or {}).get("text_fade_s", 0.1))
     lane_iter = iter(comp_lanes)
     for g in (layered if want("graphics") else []):
-        for c in companions:  # the editor's own sounds for this graphic, same offset, trim and level
+        for c in g.get("companions", companions):  # the editor's own sounds for this graphic, same offset, trim and level
             lane = next(lane_iter)
             at = max(0.0, g["start"] + c["offset"])
             bridge("place", path=str(c["file"]), kind="audio", track=first_comp_track + lane, start=at,
                    **{"in": c["in"], "out": c["in"] + c["duration"]})
-            ex = c["exemplar"]
-            bridge("copyAttributes", kind="audio", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"],
-                   track=first_comp_track + lane, start=at)
+            ex = c.get("exemplar")
+            if ex:
+                bridge("copyAttributes", kind="audio", fromSequence=ex["sequence"], fromTrack=ex["track"], fromStart=ex["start"],
+                       track=first_comp_track + lane, start=at)
+            else:  # no level to copy: the sound-design target (effects peak ~-9 dB)
+                from audio_mix import file_peak_db
+                target = float(((brand.get("audio") or {}).get("levels_peak_db") or {}).get("sfx", -9))
+                peak = file_peak_db(Path(c["file"]))
+                if peak is not None:
+                    bridge("volume", track=first_comp_track + lane, start=at, db=round(target - peak, 2))
         for k, layer in enumerate(g["layers"]):
             node = layer["nodeId"]
             if layer.get("aep") and layer.get("comp"):
@@ -738,7 +780,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
                 # editing one text never changes the others; updates reuse it.
                 node = bridge("aeCopy", aep=layer["aep"], comp=layer["comp"], bin=bin_name,
                               name=f"{short} – {g['text'][:40]}").get("nodeId", node)
-            tl = T_GFX + max(gfx_lanes + [-1]) + 1 + k
+            tl = T_GFX + max(gfx_lanes + [-1]) + 1 + int(layer.get("lane", k))
             st = g["start"] + float(layer.get("offset", 0))
             dur = max(0.3, g["duration"] - float(layer.get("offset", 0)))
             bridge("placeItem", nodeId=node, track=tl, start=st, duration=dur, name=layer.get("name"))

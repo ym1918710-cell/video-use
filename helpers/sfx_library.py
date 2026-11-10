@@ -204,7 +204,9 @@ def effect_events(edl: dict, rate: str, brand: dict | None = None, edit_dir: Pat
             dx = abs(float(b.get("x", a.get("x", 0.5))) - float(a.get("x", 0.5)))
             # Only a strong, fast move earns a sound; slow drifts and gentle
             # pushes stay silent (a whoosh on every zoom sounds cheap).
-            if dscale / span >= 0.35 or dx / span >= 0.25:
+            push = float(b.get("scale", a.get("scale", 1))) > float(a.get("scale", 1))
+            # a pull back to normal framing is never an effect (only a push-in or a fast pan)
+            if (push and dscale / span >= 0.35) or dx / span >= 0.25:
                 events.append({"time": timing[i][1] + float(a.get("t", 0)), "kind": "camera",
                                "sound": "zoom", "opt": b.get("sfx", r.get("sfx")), "label": f"range {i} move"})
         zoom = r.get("zoom")
