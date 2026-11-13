@@ -596,6 +596,8 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
 
     infos = {name: probe(path) for name, path in sources.items()}
     # Sound first (each overwrite then loses its dragged-along picture), then picture.
+    from render import boundary_audio_shifts
+    split_shifts = boundary_audio_shifts(ranges)
     for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
         if not want("picture"):
             break
@@ -605,7 +607,11 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         a_src = sources[sound["source"]] if sound else sources[r["source"]]
         a_in = float(sound.get("start", r["start"])) if sound else float(r["start"])
         if any(st.get("codec_type") == "audio" for st in probe(a_src).get("streams", [])):
-            bridge("place", path=str(a_src), kind="audio", track=0, start=start, **{"in": a_in, "out": a_in + dur})
+            # J/L cuts: the sound's edges move against the picture (j_cut_ms / l_cut_ms)
+            s_in, s_out = split_shifts[k], split_shifts[k + 1]
+            s_in = max(s_in, -a_in)
+            bridge("place", path=str(a_src), kind="audio", track=0, start=start + s_in,
+                   **{"in": a_in + s_in, "out": a_in + dur + s_out})
             if r.get("audio_gain_db"):
                 bridge("volume", track=0, start=start, db=float(r["audio_gain_db"]))
     for k, (r, (_n, start, dur)) in enumerate(zip(ranges, timing)):
@@ -614,6 +620,8 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         name = r["source"]
         src = sources[name]
         own_sound = not isinstance(r.get("audio_source"), dict)  # the picture's own audio is the dialogue: keep it linked
+        if split_shifts[k] or split_shifts[k + 1]:
+            own_sound = False  # a J/L cut: its sound was laid on its own, offset from the picture
         if want("picture"):
             bridge("place", path=str(src), kind="video", track=0, start=start, **{"in": float(r["start"]), "out": float(r["start"]) + dur},
                    name=f"{k + 1:02d} {r.get('beat') or name}", keepAudio=own_sound)

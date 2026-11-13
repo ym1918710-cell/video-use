@@ -116,12 +116,17 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - Subtitles: `build` imports the SRT as a caption track. The editor runs Graphics → Upgrade Caption to Graphic, then `build --only caption_fx` pastes the learned subtitle clip (`premiere_house.captions`: entrance, shadow, Motion position) onto every one, skipping Text so each keeps its words.
   - Zoom: Transform with Uniform Scale on, keys on Scale.
   - **Two paths.** For "on the device", render with `run_edit.py`. For "in Premiere", run `build --prepare` straight away. It makes only the assets (graphics, matte, SFX list, manifest), with no mix, no final video and no QC render, and the result is checked in the sequence itself.
+  - J/L cuts (`j_cut_ms` / `l_cut_ms`) are built in Premiere too: that range's sound is laid unlinked, offset from its picture.
   - The project is never saved for the editor.
 - **`beats.py suggest <edl.json>`** finds lines that earn a beat in the transcripts, such as the **denial** ("أنا مش ممدوح", "I'm not…").
   - Put them in `edl["beats"]` and the render adds a colour strobe behind the subject (local matte keeps them in front) and an error buzzer 0.2 s early.
   - The beat lasts 13 frames.
   - The colour and sound come from `brand_kit.beats.denial`.
   - A riser builds into the last beat of a run and ends as the buzzer starts (`riser_sfx`, else the library's riser role; `"riser": false` turns it off).
+- **`listen.py <audio> [--from s --to s] [--png out.png]`** — "hears" any sound for the agent. It measures peak, RMS, attack, decay and hit point, plus brightness, noisy vs tonal, pitch, onsets, silences and speech-likeness. It also names the shape: hit, pop, whoosh, riser, chime, beep, sustained or speech. `--png` draws the waveform over the spectrogram so the agent can look at it.
+  - **Placement:** SFX are placed by their hit point, so they land on the event; this also works when a file starts with silence.
+  - **Splits:** `listen.py splits <edl.json>` proposes J-cuts only where both sides of the moved cut are quiet. That means no clipped last syllable and no director's voice. Where the cut is tight, it proposes holding the previous shot longer.
+  - **Before choosing a sound,** listen to it. Never pick a sound by its name alone.
 - **`reel_review.py <edl.json>`** — checks a reel from the EDL before any render (both paths). It confirms the hook moves within 3 s, and it lists every stretch longer than 3 s with no visual change (cut, zoom, graphic, overlay, B-roll). Run it on the plan and fill each stretch it reports.
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.

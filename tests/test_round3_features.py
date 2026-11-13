@@ -612,3 +612,23 @@ class ReelReviewTests(unittest.TestCase):
             got = review(edl, Path(tmp), rate="25/1")
             self.assertTrue(got["hook_change_in_3s"])
             self.assertEqual([(g["from"], g["to"]) for g in got["static_stretches"]], [(8.0, 12.0)])
+
+
+class ListenTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_shapes_from_the_signal(self):
+        from listen import describe
+        sr = 22050
+        t = np.arange(int(sr * 2.0)) / sr
+        noise = np.random.default_rng(0).standard_normal(len(t)).astype(np.float32)
+        riser = (noise * np.linspace(0.01, 0.9, len(t))).astype(np.float32)
+        self.assertTrue(describe(riser, sr)["shape"].startswith("riser"))
+        click = np.zeros(int(sr * 0.1), np.float32); click[50:300] = noise[:250]
+        self.assertEqual(describe(click, sr)["shape"], "pop/click")
+        self.assertEqual(describe(np.zeros(sr, np.float32), sr)["shape"], "silence")
+        late_hit = np.zeros(sr, np.float32); late_hit[int(0.6 * sr):int(0.6 * sr) + 400] = 0.9
+        got = describe(late_hit, sr)
+        self.assertAlmostEqual(got["hit_point_s"], 0.6, delta=0.02)  # lands after the leading silence
+        self.assertAlmostEqual(got["starts_after_s"], 0.6, delta=0.02)

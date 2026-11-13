@@ -261,7 +261,7 @@ def auto_sfx(edl: dict, edit_dir: Path, rate: str, brand: dict | None = None,
                 source = pick["file"]
                 if pick.get("lufs") is not None:
                     gain = ROLE_LUFS.get(sound, -28) - float(pick["lufs"])
-                lead = peak_offset(Path(source)) if sound not in ("pop", "impact", "tick") else 0.0
+                lead = peak_offset(Path(source))  # listened: the sound lands on the event
         file = str(source) if source else str(stock_file(sound if sound in SOUNDS else "swoosh", edit_dir))
         hits = [event["time"]]
         if event.get("words", 0) > 1:  # one tick per word as it types on
@@ -278,7 +278,13 @@ _PEAKS: dict[str, float] = {}
 
 
 def peak_offset(path: Path) -> float:
-    """Seconds from a sound's start to its loudest 20 ms — where a whoosh 'lands'."""
+    """Seconds from a sound's start to where it *lands* (listen.py hit point):
+    a hit's onset after any leading silence, a whoosh's peak, a riser's top."""
+    try:
+        from listen import listen
+        return min(float(listen(str(path)).get("hit_point_s", 0.0)), 4.5)
+    except Exception:
+        pass
     key = str(path)
     if key not in _PEAKS:
         raw = subprocess.run(["ffmpeg", "-v", "error", "-t", "3", "-i", key, "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
