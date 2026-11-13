@@ -67,6 +67,18 @@ command -v yt-dlp >/dev/null || brew install yt-dlp     # optional
 
 If `brew` / `apt` / `pacman` requires a sudo prompt, tell the user the exact command and wait. Do not invent a password.
 
+#### Linux extras (graphics, captions, face framing)
+
+macOS renders text with CoreText and finds faces and people with Vision. Linux uses Pillow with libraqm for text (Arabic letter joining) and OpenCV for faces:
+
+```bash
+# Debian / Ubuntu
+# sudo apt-get install -y libraqm0 fontconfig fonts-noto-core fonts-noto-ui-core
+# uv sync --extra linux          # or: pip install opencv-python-headless
+```
+
+Brand fonts given as `.ttf`/`.otf` paths in `brand_kit.json` work on both platforms; family names resolve through `fc-match`. `behind_subject` graphics need a person matte (macOS Vision), so on Linux, put the element above the subject instead.
+
 ### 4. Register the skill with the current agent
 
 Figure out which agent you are running under, and register once. A symlink of the whole repo directory is the right shape — helpers/ needs to sit next to SKILL.md.

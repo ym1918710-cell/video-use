@@ -139,5 +139,36 @@ class RenderRateTests(unittest.TestCase):
         )
 
 
+class PunchInTests(unittest.TestCase):
+    def test_centered_punch_in_preserves_even_dimensions(self):
+        chain = render.punch_in_filter({"scale": 1.08})
+        self.assertIn("crop=trunc(iw/1.080/2)*2", chain)
+        self.assertTrue(chain.endswith("scale=1920:1080"))
+
+    def test_missing_punch_in_adds_no_filter(self):
+        self.assertEqual(render.punch_in_filter(None), "")
+
+
+class SubjectLayerTests(unittest.TestCase):
+    def test_graph_behind_subject_uses_alpha_matte_before_top_overlays(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base, graph, mask, top, output = [root / name for name in ("base.mp4", "graph.mov", "mask.mkv", "top.mov", "final.mp4")]
+            for path in (base, graph, mask, top):
+                path.touch()
+            with patch.object(render.subprocess, "run") as run:
+                render.build_final_composite(
+                    base, [{"file": str(top), "start_in_output": 0, "duration": 1}], None, output, root,
+                    behind_subject_overlays=[{"file": str(graph), "start_in_output": 0, "duration": 1}],
+                    subject_mask_path=mask,
+                )
+            command = run.call_args.args[0]
+            graph = command[command.index("-filter_complex") + 1]
+            self.assertIn("alphamerge", graph)
+            self.assertIn("scale2ref", graph)
+            self.assertIn("[subject_foreground]", graph)
+            self.assertIn("[top0]", graph)
+
+
 if __name__ == "__main__":
     unittest.main()

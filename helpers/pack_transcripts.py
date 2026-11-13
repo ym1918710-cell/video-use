@@ -184,7 +184,8 @@ def main() -> None:
     if not transcripts_dir.is_dir():
         sys.exit(f"no transcripts directory at {transcripts_dir}")
 
-    json_files = sorted(transcripts_dir.glob("*.json"))
+    # Skip macOS AppleDouble sidecars ("._x.json") that external drives carry.
+    json_files = sorted(p for p in transcripts_dir.glob("*.json") if not p.name.startswith("._"))
     if not json_files:
         sys.exit(f"no .json files in {transcripts_dir}")
 
