@@ -595,3 +595,20 @@ class SoundDesignLevelTests(unittest.TestCase):
             got = level_to_peak(items, Path(tmp), -9.0)
             self.assertAlmostEqual(got[0]["gain_db"], -9.0 - (-6.0), delta=0.6)  # lifted so the peak lands on -9
             self.assertEqual(got[1]["gain_db"], -20)  # a locked gain stays
+
+
+class ReelReviewTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HELPERS))
+
+    def test_static_stretches_and_moving_overlays(self):
+        from reel_review import review
+        with tempfile.TemporaryDirectory() as tmp:
+            edl = {"ranges": [{"source": "A", "start": 0, "end": 8}, {"source": "A", "start": 9, "end": 13}], "sources": {"A": "a.mp4"}}
+            got = review(edl, Path(tmp), rate="25/1")
+            self.assertFalse(got["hook_change_in_3s"])
+            self.assertEqual([(g["from"], g["to"]) for g in got["static_stretches"]], [(0.0, 8.0), (8.0, 12.0)])
+            edl["overlays"] = [{"file": "x.mov", "start_in_output": 1.0, "duration": 6.5}]
+            got = review(edl, Path(tmp), rate="25/1")
+            self.assertTrue(got["hook_change_in_3s"])
+            self.assertEqual([(g["from"], g["to"]) for g in got["static_stretches"]], [(8.0, 12.0)])

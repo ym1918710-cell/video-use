@@ -122,6 +122,7 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - The beat lasts 13 frames.
   - The colour and sound come from `brand_kit.beats.denial`.
   - A riser builds into the last beat of a run and ends as the buzzer starts (`riser_sfx`, else the library's riser role; `"riser": false` turns it off).
+- **`reel_review.py <edl.json>`** — checks a reel from the EDL before any render (both paths). It confirms the hook moves within 3 s, and it lists every stretch longer than 3 s with no visual change (cut, zoom, graphic, overlay, B-roll). Run it on the plan and fill each stretch it reports.
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
 - **`library.py scan|tag|search|suggest`** — the user's licensed music & SFX library.
