@@ -402,7 +402,13 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     manifest_path = base_dir / "render_manifest.json"
     m = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
     if m is None:
-        raise SystemExit("render the edit once (run_edit.py) first: graphics, the matte and the SFX list come from that render")
+        needs_assets = any(edl.get(k) for k in ("graphics", "overlays", "behind_subject_overlays", "beats")) or \
+            any(r.get("transition") for r in edl.get("ranges") or [])
+        if needs_assets:
+            raise SystemExit("make the assets first: premiere.py build <edl> --prepare (graphics, matte and SFX list)")
+        # A plain cut (picture, sound, captions): nothing to pre-render.
+        m = {"canvas": list(resolve_canvas(edl, base_dir)), "rate": resolve_output_rate(edl, base_dir, None),
+             "overlays": [], "behind_subject_overlays": [], "subject_mask": None, "base": None, "sfx": []}
     canvas = tuple(m["canvas"]) if m else resolve_canvas(edl, base_dir)
     rate = m["rate"] if m else resolve_output_rate(edl, base_dir, None)
     fps = float(Fraction(rate))
