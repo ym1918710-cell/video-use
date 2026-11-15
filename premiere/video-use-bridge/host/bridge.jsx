@@ -344,6 +344,36 @@ var vu = (function () {
             fresh.name = a.name;
             return { ok: true, nodeId: fresh.nodeId, reused: false };
         },
+        // Export each marked part on its own through Media Encoder: for every
+        // sequence marker whose name starts with `prefix`, set In/Out to the
+        // marker, queue a job (In to Out), then put the editor's In/Out back.
+        // `dry` only lists the markers. `start` begins the batch in Media Encoder.
+        queueExports: function (a) {
+            var seq = activeSeq(a);
+            if (!seq) return { error: "no sequence " + (a.sequence || "(active)") };
+            var list = [], m = seq.markers.getFirstMarker();
+            while (m) {
+                if (String(m.name).indexOf(a.prefix || "") === 0)
+                    list.push({ name: String(m.name), start: m.start.seconds, end: m.end.seconds });
+                m = seq.markers.getNextMarker(m);
+            }
+            if (a.items) list = a.items;  // explicit In/Out per part (e.g. from the cuts) instead of markers
+            if (a.dry) return { markers: list };
+            app.encoder.launchEncoder();
+            var oldIn = seq.getInPoint(), oldOut = seq.getOutPoint(), queued = [];
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i];
+                if (!(it.end > it.start)) continue;
+                seq.setInPoint(it.start); seq.setOutPoint(it.end);
+                var safe = it.name.replace(/[\/:*?"<>|]/g, "-").replace(/\s+/g, " ");
+                var file = a.folder + "/" + safe + ".mp4";
+                var job = app.encoder.encodeSequence(seq, file, a.preset, 1, 1);  // 1 = In to Out, remove when done
+                queued.push({ name: it.name, file: file, job: job ? String(job) : null, start: it.start, end: it.end });
+            }
+            seq.setInPoint(oldIn); seq.setOutPoint(oldOut);
+            if (a.start) app.encoder.startBatch();
+            return { queued: queued };
+        },
         // Move the end of the clip at `start` (e.g. so nothing runs over the outro).
         setEnd: function (a) {
             var seq = activeSeq(a);
