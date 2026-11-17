@@ -158,6 +158,16 @@ def media_checks(inspect: dict, a: float, b: float) -> dict:
         cur = max(cur, e)
     if b - cur > 0.04:
         gaps.append([round(cur, 2), round(b, 2)])
+    # a hole in V1 that a picture on a higher track fills (the outro over the end) is not a gap
+    above = sorted((c["start"], c["end"]) for kind, idx, c in _clips_in(inspect, a, b)
+                   if kind == "video" and idx > 0 and not c.get("disabled") and ((c.get("item") or {}).get("path") or ""))
+    def covered(g0: float, g1: float) -> bool:
+        x = g0
+        for s0, s1 in above:
+            if s0 <= x + 0.04 and s1 > x:
+                x = s1
+        return x >= g1 - 0.04
+    gaps = [g for g in gaps if not covered(*g)]
     return {"offline": offline, "v1_gaps": gaps}
 
 
@@ -192,8 +202,12 @@ def sound_checks(video: Path, offset: float) -> dict:
     from listen import listen
     d = listen(str(video))
     peak = float(d["peak_db"]) if d.get("peak_db") is not None else None
-    return {"integrated_lufs": float(lufs[-1]) if lufs else None, "true_peak_db": float(tp[-1]) if tp else None,
-            "sample_peak_db": peak, "dead_air": dead, "clipping": bool(peak is not None and peak > -0.1)}
+    true_peak = float(tp[-1]) if tp else None
+    # Clipping is judged on the true peak of the mix (ebur128, what a delivery meter reads); listen's
+    # sample peak of a decoded AAC can read above 0 dBFS where the mix itself does not clip.
+    clipping = (true_peak > 0.0) if true_peak is not None else bool(peak is not None and peak > -0.1)
+    return {"integrated_lufs": float(lufs[-1]) if lufs else None, "true_peak_db": true_peak,
+            "sample_peak_db": peak, "dead_air": dead, "clipping": bool(clipping)}
 
 
 def _volume_db(clip: dict) -> float:
@@ -219,10 +233,18 @@ def _window_peak(path: str, start: float, dur: float) -> float | None:
     return _WINDOW_PEAKS[key]
 
 
-def _role(track_index: int, clip: dict) -> str:
+def _role(track_index: int, clip: dict, pictures: set | None = None) -> str:
     if track_index == 0:
         return "voice"
+    path = ((clip.get("item") or {}).get("path") or "")
+    if pictures and (path, round(clip["start"], 1)) in pictures:
+        return "picture_sound"  # a clip's own sound (the outro's): judged with its picture, not as an effect
     return "music" if clip["end"] - clip["start"] >= MUSIC_MIN_S else "sfx"
+
+
+def _pictures(inspect: dict) -> set:
+    return {(((c.get("item") or {}).get("path") or ""), round(c["start"], 1))
+            for t in inspect.get("video", []) for c in t["clips"] if (c.get("item") or {}).get("path")}
 
 
 def level_checks(inspect: dict, a: float, b: float, targets: dict[str, float]) -> dict:
@@ -231,6 +253,7 @@ def level_checks(inspect: dict, a: float, b: float, targets: dict[str, float]) -
     Measured from the clips themselves, so it works per track and even when the picture is offline.
     """
     rows, off = [], []
+    pics = _pictures(inspect)
     for t in inspect.get("audio", []):
         for c in t["clips"]:
             if c["end"] <= a or c["start"] >= b or c.get("disabled"):
@@ -241,7 +264,9 @@ def level_checks(inspect: dict, a: float, b: float, targets: dict[str, float]) -
             src = _window_peak(path, c["inPoint"], c["end"] - c["start"])
             if src is None or src < SILENT_DB:
                 continue
-            role = _role(t["index"], c)
+            role = _role(t["index"], c, pics)
+            if role == "picture_sound":
+                continue
             peak = round(src + _volume_db(c), 1)
             row = {"track": f"A{t['index'] + 1}", "at": round(c["start"], 2), "name": c["name"], "role": role,
                    "peak_db": peak, "target_db": targets.get(role)}
@@ -353,12 +378,13 @@ def sfx_sync_checks(inspect: dict, a: float, b: float, video: Path | None = None
     """
     from listen import listen
     points, moving = layer_events(inspect, a, b)
+    pics = _pictures(inspect)
     rows, off = [], []
     for t in inspect.get("audio", []):
         if t["index"] == 0:
             continue
         for c in t["clips"]:
-            if not (a <= c["start"] < b) or c.get("disabled") or _role(t["index"], c) != "sfx":
+            if not (a <= c["start"] < b) or c.get("disabled") or _role(t["index"], c, pics) != "sfx":
                 continue
             path = ((c.get("item") or {}).get("path") or "").strip()
             if not path or not os.path.exists(path):
@@ -583,7 +609,7 @@ def screen_checks(inspect: dict, a: float, b: float, video: Path, work: Path, ed
             mismatched.append({"at": round(c["start"], 2), "shown": shown, "heard": " ".join(heard), "match": round(ratio, 2)})
 
     uncaptioned = []
-    if caps or words:
+    if caps:  # with no caption track at all (the editor adds them himself) there is nothing to hold speech against
         k = 0
         run: list[dict] = []
         def covered(t: float) -> bool:
@@ -610,7 +636,7 @@ def screen_checks(inspect: dict, a: float, b: float, video: Path, work: Path, ed
         return sum(1 for w in toks if any(_close(w, y) for y in shown)) / len(toks) >= CAPTION_MATCH
     uncaptioned = [u for u in uncaptioned if not on_screen(u[0], u[1], u[2])]
     faces_seen = sum(1 for r in seen if r.get("faces"))
-    return {"captions": len(caps), "caption_band": [round(x, 2) for x in band] if band else None,
+    return {"captions": len(caps), "caption_track": bool(caps), "caption_band": [round(x, 2) for x in band] if band else None,
             "frames_read": len(seen), "frames_with_face": faces_seen,
             "words_heard": len(words), "transcripts_missing": missing,
             "caption_mismatch": mismatched, "captions_unread": unread, "uncaptioned_speech": uncaptioned,
@@ -694,7 +720,7 @@ def review(bridge, sequence: str, a: float, b: float, out_dir: Path, every: floa
     for t in screen.get("transcripts_missing", []):
         issues.append(f"no transcript found for {t} (captions can't be checked against the words; pass --edit)")
     if snd["clipping"]:
-        issues.append(f"the mix clips (sample peak {snd['sample_peak_db']} dBFS)")
+        issues.append(f"the mix clips (true peak {snd['true_peak_db']} dBTP)")
 
     report = {
         "sequence": sequence, "from": a, "to": b, "preview": str(video), "preview_seconds": round(dur, 2),
@@ -709,8 +735,9 @@ def review(bridge, sequence: str, a: float, b: float, out_dir: Path, every: floa
              f"- SFX on their event: {len(sync['sfx']) - len(sync['off_event'])}/{len(sync['sfx'])}",
              "- Peak per track: " + (", ".join(f"{k} {v['max_peak_db']} dB ({'/'.join(v['roles'])})" for k, v in levels["tracks"].items()) or "no sound files found"),
              f"- Targets: " + ", ".join(f"{k} {v} dB" for k, v in targets.items()) + f" (±{LEVEL_SLACK})",
-             (f"- Captions read: {screen['captions'] - len(screen['caption_mismatch']) - len(screen['captions_unread'])}/{screen['captions']} match the speech"
-              f" ({len(screen['captions_unread'])} unreadable); face in {screen['frames_with_face']}/{screen['frames_read']} frames"
+             (("- No caption track yet; " if not screen["caption_track"] else
+               f"- Captions read: {screen['captions'] - len(screen['caption_mismatch']) - len(screen['captions_unread'])}/{screen['captions']} match the speech"
+               f" ({len(screen['captions_unread'])} unreadable); ") + f"face in {screen['frames_with_face']}/{screen['frames_read']} frames"
               if "captions" in screen else "- Captions and face: skipped (media offline)"), "",
              "## Issues" if issues else "## Issues: none found", *[f"- {i}" for i in issues], "",
              *(["## Not checked", *[f"- {x}" for x in report["not_checked_yet"]]] if report["not_checked_yet"] else [])]

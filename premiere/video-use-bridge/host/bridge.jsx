@@ -541,6 +541,13 @@ var vu = (function () {
             var saved = { v: [], a: [] }, v, t2;
             for (v = 0; v < seq.videoTracks.numTracks; v++) { saved.v.push(seq.videoTracks[v].isTargeted()); seq.videoTracks[v].setTargeted(a.kind !== "audio" && v === a.track, true); }
             for (t2 = 0; t2 < seq.audioTracks.numTracks; t2++) { saved.a.push(seq.audioTracks[t2].isTargeted()); seq.audioTracks[t2].setTargeted(a.kind === "audio" && t2 === a.track, true); }
+            // What of this file already sits at `start` on the other kind of
+            // track (the outro's picture placed before its sound): never removed.
+            var otherKinds = a.kind === "audio" ? seq.videoTracks : seq.audioTracks, before = [];
+            for (var bt = 0; bt < otherKinds.numTracks; bt++) {
+                var pre = clipAt(otherKinds[bt], a.start);
+                before.push(!!(pre && pre.projectItem && pre.projectItem.nodeId === item.nodeId));
+            }
             track.overwriteClip(item, a.start);
             restoreTargets(seq, saved);
             item.clearInPoint(4); item.clearOutPoint(4);
@@ -551,7 +558,7 @@ var vu = (function () {
             var other = a.kind === "audio" ? seq.videoTracks : seq.audioTracks, removed = 0;
             for (var ot = 0; ot < other.numTracks; ot++) {
                 var stray = clipAt(other[ot], a.start);
-                if (stray && stray.projectItem && stray.projectItem.nodeId === item.nodeId &&
+                if (stray && !before[ot] && stray.projectItem && stray.projectItem.nodeId === item.nodeId &&
                     Math.abs(stray.end.seconds - clip.end.seconds) < 0.05 && !(a.kind !== "audio" && a.keepAudio)) {
                     try {
                         var sel = seq.getSelection(); for (var z = 0; sel && z < sel.length; z++) sel[z].setSelected(false, true);

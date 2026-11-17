@@ -404,7 +404,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     m = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
     if m is None:
         needs_assets = any(edl.get(k) for k in ("graphics", "overlays", "behind_subject_overlays", "beats")) or \
-            any(r.get("transition") for r in edl.get("ranges") or [])
+            any((r.get("transition") or {}).get("type") not in (None, "dissolve") for r in edl.get("ranges") or [])  # a dissolve is Premiere's own
         if needs_assets:
             raise SystemExit("make the assets first: premiere.py build <edl> --prepare (graphics, matte and SFX list)")
         # A plain cut (picture, sound, captions): nothing to pre-render.
@@ -629,10 +629,20 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
         own_sound = not isinstance(r.get("audio_source"), dict)  # the picture's own audio is the dialogue: keep it linked
         if split_shifts[k] or split_shifts[k + 1]:
             own_sound = False  # a J/L cut: its sound was laid on its own, offset from the picture
-        if want("picture"):
-            bridge("place", path=str(src), kind="video", track=0, start=start, **{"in": float(r["start"]), "out": float(r["start"]) + dur},
-                   name=f"{k + 1:02d} {r.get('beat') or name}", keepAudio=own_sound)
         video = next((st for st in infos[name].get("streams", []) if st.get("codec_type") == "video"), {})
+        if want("picture"):
+            # Premiere moves an in-point that falls between the source's frames, and the clip comes up a
+            # frame short (a one-frame gap on V1): start on a source frame so it keeps its exact length.
+            src_fps = float(Fraction(video.get("r_frame_rate") or "0/1")) if video.get("r_frame_rate") not in (None, "0/0") else 0.0
+            # Count in whole frames: 331.84 + 2.64 is 334.4799… in floating point and Premiere would floor
+            # it a frame early; a hair past the frame keeps the out-point where it belongs.
+            if src_fps:
+                f_in = round(float(r["start"]) * src_fps)
+                src_in, src_out = f_in / src_fps, (f_in + round(dur * src_fps)) / src_fps + 0.002
+            else:
+                src_in, src_out = float(r["start"]), float(r["start"]) + dur
+            bridge("place", path=str(src), kind="video", track=0, start=start, **{"in": src_in, "out": src_out},
+                   name=f"{k + 1:02d} {r.get('beat') or name}", keepAudio=own_sound)
         sw, sh = int(video.get("width") or canvas[0]), int(video.get("height") or canvas[1])
         rot = rotations.get(name)
         dw, dh = (sh, sw) if rot in ("cw", "ccw") else (sw, sh)
