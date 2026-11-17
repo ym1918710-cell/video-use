@@ -374,6 +374,41 @@ var vu = (function () {
             if (a.start) app.encoder.startBatch();
             return { queued: queued };
         },
+        // Eyes: still frames of the sequence exactly as Premiere renders them
+        // (MOGRTs, Lumetri, AE comps, captions). The named sequence is made
+        // active for the export, then the editor's tab and playhead go back.
+        frames: function (a) {
+            var seq = activeSeq(a);
+            if (!seq) return { error: "no sequence " + (a.sequence || "(active)") };
+            var before = app.project.activeSequence, head = seq.getPlayerPosition();
+            if (before !== seq) app.project.openSequence(seq.sequenceID);
+            app.enableQE();
+            var qs = qe.project.getActiveSequence(), out = [];
+            for (var i = 0; i < a.times.length; i++) {
+                var t = a.times[i], base = a.folder + "/" + (a.prefix || "f") + "_" + ("0000" + i).slice(-4);
+                try {
+                    seq.setPlayerPosition(ticks(t));
+                    qs.exportFramePNG(qs.CTI.timecode, base);  // Premiere adds ".png" itself
+                    out.push({ t: t, file: base + ".png" });
+                } catch (e) { out.push({ t: t, error: String(e) }); }
+            }
+            try { seq.setPlayerPosition(head.ticks); } catch (e2) {}
+            if (before && before !== seq) app.project.openSequence(before.sequenceID);
+            return { frames: out };
+        },
+        // Eyes and ears: a quick H.264 of [from, to] with the full mix,
+        // straight from Premiere (no Media Encoder queue). The editor's
+        // In/Out marks are put back afterwards.
+        preview: function (a) {
+            var seq = activeSeq(a);
+            if (!seq) return { error: "no sequence " + (a.sequence || "(active)") };
+            var oldIn = seq.getInPoint(), oldOut = seq.getOutPoint();
+            seq.setInPoint(a.from); seq.setOutPoint(a.to);
+            var err = null;
+            try { seq.exportAsMediaDirect(a.file, a.preset, app.encoder.ENCODE_IN_TO_OUT); } catch (e) { err = String(e); }
+            seq.setInPoint(oldIn); seq.setOutPoint(oldOut);
+            return err ? { error: err } : { file: a.file };
+        },
         // Move the end of the clip at `start` (e.g. so nothing runs over the outro).
         setEnd: function (a) {
             var seq = activeSeq(a);

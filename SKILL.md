@@ -118,6 +118,11 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - **Two paths.** For "on the device", render with `run_edit.py`. For "in Premiere", run `build --prepare` straight away. It makes only the assets (graphics, matte, SFX list, manifest), with no mix, no final video and no QC render, and the result is checked in the sequence itself.
   - J/L cuts (`j_cut_ms` / `l_cut_ms`) are built in Premiere too: that range's sound is laid unlinked, offset from its picture.
   - The project is never saved for the editor.
+  - **Eyes and ears on the sequence** (`premiere_review.py`). The playhead, the active tab and In/Out go back as they were.
+    - `look "<seq>" --at t1 t2 … | --from a --to b --every 2`: PNGs straight from the sequence, exactly as Premiere renders them (MOGRTs, Lumetri, AE comps, captions), on one contact sheet.
+    - `review "<seq>" --from a --to b`: a quick H.264 of the part with its full mix (≈ real time to export), then checks: offline media (with where the link points), gaps on V1, black frames, stretches with no visual change over 3 s, dead air over 0.7 s, loudness, true peak and clipping. It writes `review.md` / `review.json`, a contact sheet and a filmstrip with the waveform.
+    - **Never say a Premiere build is done before `review` passes on the parts it touched**, or say exactly what it could not check (text over the face, captions against the words, SFX on their event, per-track levels are not automated yet).
+    - Offline media puts Premiere's "Media Offline" card in the preview and silences those clips, so every other result is about the missing files, not the edit: reconnect first.
 - **`beats.py suggest <edl.json>`** finds lines that earn a beat in the transcripts, such as the **denial** ("أنا مش ممدوح", "I'm not…").
   - Put them in `edl["beats"]` and the render adds a colour strobe behind the subject (local matte keeps them in front) and an error buzzer 0.2 s early.
   - The beat lasts 13 frames.

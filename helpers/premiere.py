@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import shutil
 import sys
@@ -879,7 +880,35 @@ def main() -> None:
     p_build.add_argument("--prepare", action="store_true",
                          help="Premiere path: first make the assets only (graphics, matte, SFX list) — no final video render")
     p_build.add_argument("--only", help=f"update just these parts of the existing sequence, comma-separated: {', '.join(SECTIONS)}")
+    p_look = sub.add_parser("look", help="still frames of a sequence, exactly as Premiere renders them")
+    p_look.add_argument("sequence")
+    p_look.add_argument("--at", type=float, nargs="+", help="sequence seconds")
+    p_look.add_argument("--from", dest="start", type=float)
+    p_look.add_argument("--to", dest="end", type=float)
+    p_look.add_argument("--every", type=float, default=2.0)
+    p_look.add_argument("--out", type=Path, help="folder (default: a scratch folder next to the project)")
+    p_rev = sub.add_parser("review", help="see and hear [from, to]: preview with its mix, checks and a report")
+    p_rev.add_argument("sequence")
+    p_rev.add_argument("--from", dest="start", type=float, required=True)
+    p_rev.add_argument("--to", dest="end", type=float, required=True)
+    p_rev.add_argument("--every", type=float, default=2.0, help="seconds between contact-sheet frames")
+    p_rev.add_argument("--out", type=Path)
     args = parser.parse_args()
+    if args.cmd in ("look", "review"):
+        import premiere_review as pr
+        out = args.out or Path.home() / "Movies" / "video-use-review" / re.sub(r"[^\w.-]+", "_", args.sequence)
+        b = Bridge()
+        b.sequence = args.sequence
+        if args.cmd == "look":
+            times = args.at or ([] if args.start is None else
+                                [round(args.start + i * args.every, 3) for i in range(int((args.end - args.start) / args.every) + 1)])
+            if not times:
+                raise SystemExit("look needs --at or --from/--to")
+            res = pr.look(b, args.sequence, times, out)
+        else:
+            res = pr.review(b, args.sequence, args.start, args.end, out / f"{args.start:.2f}-{args.end:.2f}", args.every)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+        return
     if args.cmd == "install":
         print(f"panel → {install()}\nIn Premiere: Window → Extensions → Video Use Bridge")
     elif args.cmd == "sequences":
