@@ -893,6 +893,8 @@ def main() -> None:
     p_rev.add_argument("--to", dest="end", type=float, required=True)
     p_rev.add_argument("--every", type=float, default=2.0, help="seconds between contact-sheet frames")
     p_rev.add_argument("--out", type=Path)
+    p_rev.add_argument("--reuse", action="store_true", help="re-check the last preview of this part without exporting again")
+    p_rev.add_argument("--levels", help="peak targets per role, e.g. voice=-3,sfx=-9,music=-24")
     args = parser.parse_args()
     if args.cmd in ("look", "review"):
         import premiere_review as pr
@@ -906,7 +908,8 @@ def main() -> None:
                 raise SystemExit("look needs --at or --from/--to")
             res = pr.look(b, args.sequence, times, out)
         else:
-            res = pr.review(b, args.sequence, args.start, args.end, out / f"{args.start:.2f}-{args.end:.2f}", args.every)
+            targets = {k.strip(): float(v) for k, v in (x.split("=") for x in args.levels.split(","))} if args.levels else None
+            res = pr.review(b, args.sequence, args.start, args.end, out / f"{args.start:.2f}-{args.end:.2f}", args.every, targets, args.reuse)
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return
     if args.cmd == "install":

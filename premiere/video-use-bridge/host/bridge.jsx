@@ -182,7 +182,7 @@ var vu = (function () {
             }
             for (var t = 0; t < seq.audioTracks.numTracks; t++) {
                 var at = seq.audioTracks[t], aclips = [];
-                for (var j = 0; j < at.clips.numItems; j++) aclips.push(describe(at.clips[j], false));
+                for (var j = 0; j < at.clips.numItems; j++) aclips.push(describe(at.clips[j], !!a.audioProps));
                 out.audio.push({ index: t, name: at.name, clips: aclips });
             }
             return out;
