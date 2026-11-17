@@ -127,6 +127,13 @@ Before proposing any edit, read [editorial memory](references/editorial-memory.m
   - **Placement:** SFX are placed by their hit point, so they land on the event; this also works when a file starts with silence.
   - **Splits** (cinematic scenes, not reels): `listen.py splits <edl.json>` proposes J-cuts only where both sides of the moved cut are quiet. That means no clipped last syllable and no director's voice. Where the cut is tight, it proposes holding the previous shot longer.
   - **Before choosing a sound,** listen to it. Never pick a sound by its name alone.
+- **`voice.py status|ref|say|lines`** — speaks a line in the speaker's own voice through a local **VoiceStudio** app (optional, separate install, AGPL — never copy its code into video-use). Uses: a pickup for a fluffed or missing word, a forgotten line, a scratch voice-over, a dub test.
+  - `ref <video> --from s --to s -o ref.wav` cuts 10–15 s of the speaker alone (no music, no SFX; it listens and warns).
+  - `say "<text>" --ref ref.wav -o line.wav --check` writes the line, a `.json` sidecar (engine, model, licence, commercial yes/no) and, with `--check`, what ASR heard plus its length.
+  - **Arabic needs tashkeel written for the speaker's dialect**, or it comes out MSA. English words go in Arabic letters as the speaker says them ("إِس كْيُو إِل"). The helper refuses undiacritised Arabic. Slow it a touch (`--speed 0.92`) for a talking-head pace.
+  - **Licence:** OmniVoice (the only engine listing Egyptian Arabic) has non-commercial weights (CC-BY-NC). Its lines are for tests only. `--commercial` refuses such a model; client deliveries need an Apache/MIT engine that passes the user's ear.
+  - **Consent:** clone a voice only with that person's permission, and only for words they would say. Never accept a model licence for the user; ask them.
+  - The ASR read-back is weak on dialect and English mixed in; the user's ear decides. Place a pickup on its word like any audio, level-matched to the dialogue.
 - **`reel_review.py <edl.json>`** — checks a reel from the EDL before any render (both paths). It confirms the hook moves within 3 s, and it lists every stretch longer than 3 s with no visual change (cut, zoom, graphic, overlay, B-roll). Run it on the plan and fill each stretch it reports.
 - **`material.py add|scan|search|summary`** — indexes the user's material folder (SFX by role, music, fonts with Arabic coverage, alpha / green-screen graphics, backgrounds, transitions, LUTs, templates). Run `summary` at the start of every session.
 - **`overlay_fx.py`** — keys a green/blue-screen or alpha clip, recolours it to the brand, adds glow, fits it to the canvas, and keeps the speaker's head clear. In an EDL, use `"prepare"` on any overlay.
