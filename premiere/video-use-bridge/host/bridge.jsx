@@ -374,6 +374,32 @@ var vu = (function () {
             if (a.start) app.encoder.startBatch();
             return { queued: queued };
         },
+        // The words on screen: every string a graphic clip carries (MOGRT
+        // parameters, a Text layer's Source Text) on the given tracks in
+        // [from, to]. Raw strings; Python pulls the readable text out.
+        texts: function (a) {
+            var seq = activeSeq(a);
+            if (!seq) return { error: "no sequence " + (a.sequence || "(active)") };
+            var out = [];
+            for (var v = 0; v < seq.videoTracks.numTracks; v++) {
+                if (a.tracks && a.tracks.length) { var want = false; for (var w = 0; w < a.tracks.length; w++) if (a.tracks[w] === v) want = true; if (!want) continue; }
+                var tr = seq.videoTracks[v];
+                for (var i = 0; i < tr.clips.numItems; i++) {
+                    var c = tr.clips[i];
+                    if (c.end.seconds <= a.from || c.start.seconds >= a.to) continue;
+                    var strs = [];
+                    for (var k = 0; k < c.components.numItems; k++) {
+                        var comp = c.components[k];
+                        for (var q2 = 0; q2 < comp.properties.numItems; q2++) {
+                            try { var val = comp.properties[q2].getValue(); if (typeof val === "string" && val.length) strs.push(val); } catch (e) {}
+                        }
+                    }
+                    try { if (c.isMGT()) { var m = c.getMGTComponent(); for (var r = 0; r < m.properties.numItems; r++) { try { var mv = m.properties[r].getValue(); if (typeof mv === "string" && mv.length) strs.push(mv); } catch (e2) {} } } } catch (e3) {}
+                    if (strs.length) out.push({ track: v, start: c.start.seconds, end: c.end.seconds, name: c.name, strings: strs });
+                }
+            }
+            return { texts: out };
+        },
         // Eyes: still frames of the sequence exactly as Premiere renders them
         // (MOGRTs, Lumetri, AE comps, captions). The named sequence is made
         // active for the export, then the editor's tab and playhead go back.
