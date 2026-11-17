@@ -313,7 +313,9 @@ def motion_series(video: Path, offset: float, width: int = 180, pixel_step: int 
 
 
 VIDEO_EXT = (".mov", ".mp4", ".m4v", ".mxf", ".webm", ".mkv")
-MOVING_PCT = 0.3   # % of pixels changing for the layer to count as moving
+MOVING_PCT = 0.3   # % of pixels changing for a graphic layer to count as moving
+FOOTAGE_MOVING_PCT = 6.0  # the footage itself (V1) moves all the time a little; a push or a walk-in is far more
+ONSET_PCT = 0.5    # a new element appearing inside a running movement (a cascade of pops) adds this much at once
 
 
 def _caption_like(clips: list[dict]) -> bool:
@@ -342,8 +344,6 @@ def layer_events(inspect: dict, a: float, b: float) -> tuple[list[float], list[t
             for x in (c["start"], c["end"]):
                 if a <= x <= b:
                     points.add(round(x, 3))
-            if t["index"] == 0:
-                continue
             path = ((c.get("item") or {}).get("path") or "").strip()
             if not path.lower().endswith(VIDEO_EXT) or not os.path.exists(path):
                 continue
@@ -351,7 +351,13 @@ def layer_events(inspect: dict, a: float, b: float) -> tuple[list[float], list[t
             if not len(ts):
                 continue
             ts = ts - ts[0] + c["start"]
-            on = ys > MOVING_PCT
+            # inside a running movement each new element shows as a sudden rise (a cascade of pops)
+            for i in range(3, len(ys) - 1):
+                rise = ys[i] - min(ys[i - 3:i])
+                if rise > (ONSET_PCT if t["index"] > 0 else FOOTAGE_MOVING_PCT) and ys[i] >= ys[i + 1] - 1e-6 and \
+                        rise >= ys[i - 1] - min(ys[max(0, i - 4):i - 1]):
+                    points.add(round(float(ts[i]), 3))
+            on = ys > (MOVING_PCT if t["index"] > 0 else FOOTAGE_MOVING_PCT)
             k = 0
             while k < len(on):
                 if on[k]:

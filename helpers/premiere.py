@@ -568,11 +568,16 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     # all of them (else a B-roll or a card hides it) and the zoom on top.
     T_BROLL, T_BEHIND = 1, 2
     T_CUT = T_BEHIND + n_behind
-    T_GFX = T_CUT + 1
+    # The zoom (an Adjustment Layer) scales everything under it. By default it covers the picture only
+    # (V1, B-roll, behind-text, the cut-out): graphics stay where they were designed, and a zoom pivoting
+    # on the face can never push a card off the frame or onto the face. "covers": "all" keeps the old order.
+    zoom_all = house_zoom.get("covers") == "all"
+    adj_zoom = house_zoom.get("method") == "adjustment_transform"
+    T_GFX = T_CUT + 1 + (1 if adj_zoom and not zoom_all else 0)
     n_gfx += len((brand.get("premiere_house") or {}).get("text_layers") or [])
     T_LIGHT = T_GFX + n_gfx
-    if house_zoom.get("method") == "adjustment_transform":
-        house_zoom = dict(house_zoom, track=max(int(house_zoom.get("track", 0)), T_LIGHT + 1))
+    if adj_zoom:
+        house_zoom = dict(house_zoom, track=max(int(house_zoom.get("track", 0)), T_LIGHT + 1) if zoom_all else T_CUT + 1)
     video_tracks = max(video_tracks, T_LIGHT + 2, int(house_zoom.get("track", 0)) + 1)
     n_comp_lanes = 0
     _comps = (brand.get("premiere_house") or {}).get("text_sfx") or []
