@@ -223,7 +223,16 @@ var vu = (function () {
             var clip = clipAt(trackOf(seq, "video", a.track), a.start);
             if (!clip || !clip.isMGT()) return { error: "no MOGRT at " + a.start };
             var mgt = clip.getMGTComponent(), set = [], missing = [];
-            for (var name in a.params) {
+            // `raw`: whole values set as given (a caption's full text JSON, with its run length)
+            for (var rn in (a.raw || {})) {
+                if (!a.raw.hasOwnProperty(rn)) continue;
+                var rp = null;
+                for (var ri = 0; ri < mgt.properties.numItems; ri++) if (mgt.properties[ri].displayName === rn) { rp = mgt.properties[ri]; break; }
+                if (!rp) { missing.push(rn); continue; }
+                rp.setValue(a.raw[rn], true);
+                set.push(rn);
+            }
+            for (var name in (a.params || {})) {
                 if (!a.params.hasOwnProperty(name)) continue;
                 var p = null;
                 for (var pi = 0; pi < mgt.properties.numItems; pi++) {
