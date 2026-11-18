@@ -70,7 +70,8 @@ class BuildMasterSrtTests(unittest.TestCase):
             render.build_master_srt(edl, edit, out)
             cues = [b.splitlines() for b in out.read_text().strip().split("\n\n")]
             self.assertEqual([c[2] for c in cues], ["90% OF", "WHAT A WEB", "AGENT DOES", "IS COMPLETELY", "WASTED.", "WE FIX THIS."])
-            self.assertEqual(cues[0][1], "00:00:00,090 --> 00:00:00,590")
+            # smooth_cue_timing bridges the 20 ms gap to the next cue (no caption flicker).
+            self.assertEqual(cues[0][1], "00:00:00,090 --> 00:00:00,610")
 
 
 class SubtitlesPathTests(unittest.TestCase):

@@ -14,8 +14,15 @@ Cloud-hosted video-use is coming. [Join the waitlist at video-use.com](https://v
 
 - **Cuts out filler words** (`umm`, `uh`, false starts) and dead space between takes
 - **Auto color grades** every segment (warm cinematic, neutral punch, or any custom ffmpeg chain)
-- **30ms audio fades** at every cut so you never hear a pop
+- **Equal-power audio crossfades** at every cut — no pops, no gating of room tone or music
 - **Burns subtitles** in your style — 2-word UPPERCASE chunks by default, fully customizable
+- **Brand-driven graphics** — stickers, kinetic numbers, headlines (even behind the speaker), lower thirds, logo bug, end card — dressed by a per-client `brand_kit.json`; one edit, any identity
+- **Mixes like a post house** — dialogue chain, music bed that ducks under speech and breathes in pauses, SFX accents, J/L cuts, stems
+- **Smooth camera moves** — keyframed zoom in / out and pans with real easing (subpixel, no zoompan shake), and face tracking inside a shot
+- **Multicam** — syncs angles by audio and cuts to whoever is speaking; matches colour between cameras
+- **Reframes on the face** — 16:9 → 9:16 / 4:5 crops and alternating punch-ins on jump cuts follow the speaker (local Vision)
+- **One cut, every deliverable** — extra canvases, CMX3600 / FCP7 XML hand-off to Premiere or Resolve
+- **Picks a style for the material** from a general style library, and learns new styles from reference videos
 - **Generates animation overlays** via [HyperFrames](https://github.com/heygen-com/hyperframes), [Remotion](https://www.remotion.dev/), [Manim](https://www.manim.community/), or PIL — spawned in parallel sub-agents, one per animation
 - **Self-evaluates the rendered output** at every cut boundary before showing you anything
 - **Persists session memory** in `project.md` so next week's session picks up where you left off
@@ -107,6 +114,6 @@ The self-eval loop runs `timeline_view` on the _rendered output_ at every cut bo
 2. **Audio is primary, visuals follow.** Cuts come from speech boundaries and silence gaps.
 3. **Ask → confirm → execute → self-eval → persist.** Never touch the cut without strategy approval.
 4. **Zero assumptions about content type.** Look, ask, then edit.
-5. **12 hard rules, artistic freedom elsewhere.** Production-correctness is non-negotiable. Taste isn't.
+5. **13 hard rules, artistic freedom elsewhere.** Production-correctness is non-negotiable. Taste isn't.
 
 See [`SKILL.md`](./SKILL.md) for the full production rules and editing craft.

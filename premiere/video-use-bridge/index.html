@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Video Use Bridge</title>
+<style>body{font:12px -apple-system,sans-serif;background:#232323;color:#ddd;margin:10px}b{color:#7fb2ff}#log{margin-top:6px;color:#999;white-space:pre-wrap;max-height:90px;overflow:auto}</style></head>
+<body>
+<div><b>Video Use Bridge</b> — <span id="state">starting…</span></div>
+<div id="log"></div>
+<script>
+// Local-only bridge: video-use (helpers/premiere.py) POSTs {fn, args} to
+// 127.0.0.1:7788; we run vu.call(fn, args) in Premiere's ExtendScript and
+// return its JSON. Nothing listens beyond this machine.
+var PORT = 7788;
+var http = require('http');
+var logEl = document.getElementById('log');
+function log(msg){ logEl.textContent = (new Date().toLocaleTimeString()) + '  ' + msg + '\n' + logEl.textContent.slice(0, 2000); }
+function evalHost(script){
+  return new Promise(function(resolve){ window.__adobe_cep__.evalScript(script, resolve); });
+}
+var server = http.createServer(function(req, res){
+  if (req.method === 'GET' && req.url === '/ping') { res.end('{"ok":true,"bridge":"video-use"}'); return; }
+  if (req.method !== 'POST') { res.statusCode = 405; res.end(); return; }
+  var body = '';
+  req.on('data', function(c){ body += c; });
+  req.on('end', function(){
+    var msg;
+    try { msg = JSON.parse(body); } catch (e) { res.statusCode = 400; res.end('{"error":"bad json"}'); return; }
+    // Re-read bridge.jsx on every call: tool updates apply without reopening the panel.
+    var jsx = (location.pathname.replace(/index\.html$/, '') + 'host/bridge.jsx').replace(/^\/([A-Za-z]:)/, '$1');
+    var script = '$.evalFile(' + JSON.stringify(decodeURI(jsx)) + ');vu.call(' + JSON.stringify(String(msg.fn)) + ',' + JSON.stringify(msg.args || {}) + ')';
+    evalHost(script).then(function(result){
+      log(msg.fn + ' → ' + String(result).slice(0, 120));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(result && result !== 'EvalScript error.' ? result : JSON.stringify({error: 'ExtendScript error in ' + msg.fn}));
+    });
+  });
+});
+server.listen(PORT, '127.0.0.1', function(){ document.getElementById('state').textContent = 'listening on 127.0.0.1:' + PORT; });
+server.on('error', function(e){ document.getElementById('state').textContent = 'error: ' + e.message; });
+</script>
+</body></html>
