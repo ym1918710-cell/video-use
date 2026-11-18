@@ -389,7 +389,8 @@ def favourite_sfx_map(house: dict) -> dict[str, str]:
 SECTIONS = ("picture", "broll", "zoom", "light", "behind", "graphics", "sfx", "captions", "caption_fx")
 
 
-def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set[str] | None = None) -> dict:
+def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set[str] | None = None,
+          name: str | None = None) -> dict:
     from export_timeline import _cutout, _flatten, _resolve, probe
     from face_anchor import range_face_centers
     from graphics import load_brand_kit
@@ -413,7 +414,7 @@ def build(edl_path: Path, bridge: Bridge, project: Path | None = None, only: set
     canvas = tuple(m["canvas"]) if m else resolve_canvas(edl, base_dir)
     rate = m["rate"] if m else resolve_output_rate(edl, base_dir, None)
     fps = float(Fraction(rate))
-    title = (base_dir.parent.name if base_dir.name == "edit" else base_dir.name) + " (video-use)"
+    title = name or (base_dir.parent.name if base_dir.name == "edit" else base_dir.name) + " (video-use)"
     media = base_dir / "premiere_media"
     media.mkdir(exist_ok=True)
     brand = load_brand_kit(edl, base_dir)
@@ -894,6 +895,7 @@ def main() -> None:
     p_build.add_argument("--plan-only", action="store_true", help="print the Premiere calls without sending them")
     p_build.add_argument("--prepare", action="store_true",
                          help="Premiere path: first make the assets only (graphics, matte, SFX list) — no final video render")
+    p_build.add_argument("--name", help="sequence name (default: '<folder> (video-use)'); a new name leaves the old sequence alone")
     p_build.add_argument("--only", help=f"update just these parts of the existing sequence, comma-separated: {', '.join(SECTIONS)}")
     p_look = sub.add_parser("look", help="still frames of a sequence, exactly as Premiere renders them")
     p_look.add_argument("sequence")
@@ -958,7 +960,7 @@ def main() -> None:
             edl_path = args.edl.resolve()
             subprocess.run([sys.executable, str(Path(__file__).with_name("render.py")), str(edl_path),
                             "-o", str(edl_path.parent / "premiere_preview.mp4"), "--premiere-assets"], check=True)
-        result = build(args.edl, b, args.project, only)
+        result = build(args.edl, b, args.project, only, args.name)
         if args.plan_only:
             print(json.dumps(b.log, ensure_ascii=False, indent=1)[:6000])
         print(json.dumps(result, ensure_ascii=False))
