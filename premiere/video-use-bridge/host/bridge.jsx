@@ -232,6 +232,29 @@ var vu = (function () {
                 rp.setValue(a.raw[rn], true);
                 set.push(rn);
             }
+            // `nth`: [{name, n, value}] — the n-th parameter with that display name (a MOGRT that repeats
+            // "Title Text" once per notification). A text value replaces textEditValue in its JSON.
+            var nth = a.nth || [];
+            for (var q = 0; q < nth.length; q++) {
+                var seen = 0, hit = null;
+                for (var pj = 0; pj < mgt.properties.numItems; pj++) {
+                    if (mgt.properties[pj].displayName !== nth[q].name) continue;
+                    if (seen === nth[q].n) { hit = mgt.properties[pj]; break; }
+                    seen++;
+                }
+                if (!hit) { missing.push(nth[q].name + "#" + nth[q].n); continue; }
+                var cv2 = hit.getValue(), v2 = nth[q].value;
+                if (typeof cv2 === "string" && cv2.charAt(0) === "{" && typeof v2 === "string" && !nth[q].raw) {
+                    try {
+                        var o2 = eval("(" + cv2 + ")"); o2.textEditValue = v2;
+                        if (o2.fontTextRunLength) o2.fontTextRunLength = [v2.length];
+                        if (nth[q].font && o2.fontEditValue) o2.fontEditValue = [nth[q].font];
+                        v2 = json(o2);
+                    } catch (e5) {}
+                }
+                hit.setValue(v2, true);
+                set.push(nth[q].name + "#" + nth[q].n);
+            }
             for (var name in (a.params || {})) {
                 if (!a.params.hasOwnProperty(name)) continue;
                 var p = null;
@@ -645,7 +668,20 @@ var vu = (function () {
 
         mogrt: function (a) {
             var seq = activeSeq(a);
-            var clip = seq.importMGT(a.path, ticks(a.start), a.track, a.audioTrack || 0);
+            // A MOGRT can carry audio, and importMGT overwrites the audio track it is given. A1 (the
+            // dialogue) was once wiped this way: use the first audio track with nothing in this span.
+            var at = a.audioTrack;
+            if (at === undefined || at === null) {
+                at = -1;
+                var endS = a.start + (a.duration || 1);
+                for (var ti = seq.audioTracks.numTracks - 1; ti >= 1; ti--) {
+                    var busy = false, tr = seq.audioTracks[ti];
+                    for (var ci = 0; ci < tr.clips.numItems; ci++) if (tr.clips[ci].end.seconds > a.start && tr.clips[ci].start.seconds < endS) busy = true;
+                    if (!busy) { at = ti; break; }
+                }
+                if (at < 0) return { error: "no empty audio track for the MOGRT's sound (add one first)" };
+            }
+            var clip = seq.importMGT(a.path, ticks(a.start), a.track, at);
             if (!clip) return { error: "importMGT failed: " + a.path };
             clip.end = seconds(a.start + a.duration);
             var set = [], missing = [];
